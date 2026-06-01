@@ -1,0 +1,13 @@
+schemas/gschemas.compiled
+
+*.zip
+*.tar.gz
+*.backup.*
+
+*~
+*.swp
+*.swo
+
+.DS_Store
+Thumbs.db
+

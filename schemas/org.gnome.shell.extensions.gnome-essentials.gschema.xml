@@ -1,0 +1,354 @@
+<?xml version="1.0" encoding="utf-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.gnome-essentials" path="/org/gnome/shell/extensions/gnome-essentials/">
+    
+    <!-- Flagship: Deep Work Focus Mode Toggles -->
+    <key name="deepwork-enabled" type="b">
+      <default>false</default>
+      <summary>Enable Deep Work Focus Mode</summary>
+      <description>Hides notifications, panels, docks, and displays an ambient focus filter.</description>
+    </key>
+    
+    <key name="deepwork-snooze-level" type="i">
+      <default>1</default>
+      <summary>Visual Suppression Level</summary>
+      <description>0 = Suppress Dock and Notifications; 1 = Suppress Panel, Dock, Notifications, and optional ambient effects; 2 = True ambient dimming behind the focused window.</description>
+    </key>
+
+    <key name="deepwork-hide-dock" type="b">
+      <default>true</default>
+      <summary>Hide Dock</summary>
+      <description>Automatically hide the desktop dock (Dash to Dock or Dash to Panel) during Deep Work.</description>
+    </key>
+
+    <key name="deepwork-hide-panel" type="b">
+      <default>true</default>
+      <summary>Hide Top Panel</summary>
+      <description>Automatically hide the shell's top panel during Deep Work (Level 2).</description>
+    </key>
+
+    <key name="deepwork-hide-panel-in-overview" type="b">
+      <default>false</default>
+      <summary>Hide Top Panel in Overview</summary>
+      <description>Controls whether the top panel is hidden while the Activities overview is open.</description>
+    </key>
+
+    <key name="deepwork-mute-notifications" type="b">
+      <default>true</default>
+      <summary>Mute Notifications</summary>
+      <description>Automatically silence notification banners during Deep Work.</description>
+    </key>
+
+    <!-- Ambient Visual Glow & Blur Customizations -->
+    <key name="deepwork-ambient-dim" type="b">
+      <default>true</default>
+      <summary>Ambient Background Dimmer</summary>
+      <description>Applies a dimming filter to background windows or workspaces.</description>
+    </key>
+
+    <key name="deepwork-ambient-color" type="s">
+      <default>"#0a0d1a"</default>
+      <summary>Ambient Dimming Overlay Color</summary>
+      <description>Hex or RGBA color applied to background windows.</description>
+    </key>
+
+    <key name="deepwork-ambient-dim-opacity" type="d">
+      <default>0.5</default>
+      <summary>Ambient Dimming Opacity</summary>
+      <description>Opacity level of the dimming overlay (0.0 to 1.0).</description>
+    </key>
+
+    <key name="deepwork-ambient-blur-intensity" type="d">
+      <default>0.5</default>
+      <summary>Ambient Background Blur Intensity</summary>
+      <description>Applies dynamic blur filter to background windows (0.0 to 1.0).</description>
+    </key>
+
+    <key name="deepwork-true-ambient-opacity" type="d">
+      <default>0.82</default>
+      <summary>True Ambient Overlay Opacity</summary>
+      <description>Opacity of the true ambient overlay used in the strongest focus mode (minimum 0.1).</description>
+    </key>
+
+    <key name="deepwork-ambient-dim-level3" type="b">
+      <default>true</default>
+      <summary>Keep background window dim active on Level 3</summary>
+      <description>Applies background window dimming under the True Ambient scrim in Level 3 focus mode.</description>
+    </key>
+
+    <key name="deepwork-ambient-blur-level3" type="b">
+      <default>true</default>
+      <summary>Keep background window blur active on Level 3</summary>
+      <description>Applies background window blur under the True Ambient scrim in Level 3 focus mode.</description>
+    </key>
+
+    <!-- Pomodoro Timer Settings -->
+    <key name="deepwork-pomodoro-timer-enabled" type="b">
+      <default>false</default>
+      <summary>Integrated Pomodoro Timer</summary>
+      <description>Tracks Pomodoro focus and rest blocks with visual indicators.</description>
+    </key>
+
+    <key name="deepwork-pomodoro-focus-time" type="i">
+      <default>25</default>
+      <range min="10" max="300"/>
+      <summary>Focus Duration (minutes)</summary>
+      <description>Length of the deep work block (10 to 300 minutes).</description>
+    </key>
+
+    <key name="deepwork-pomodoro-focus-infinite" type="b">
+      <default>false</default>
+      <summary>Indefinite Focus Sprint</summary>
+      <description>When enabled, the focus session runs indefinitely as a count-up timer until explicitly stopped.</description>
+    </key>
+
+    <key name="deepwork-pomodoro-rest-time" type="i">
+      <default>5</default>
+      <range min="5" max="180"/>
+      <summary>Rest Duration (minutes)</summary>
+      <description>Length of the recovery block (5 to 180 minutes).</description>
+    </key>
+
+    <key name="deepwork-pomodoro-clock-enabled" type="b">
+      <default>false</default>
+      <summary>Auto Stop Clock</summary>
+      <description>When enabled, disables Deep Work and resets the Pomodoro timer when the system clock reaches the configured time.</description>
+    </key>
+
+    <key name="deepwork-pomodoro-clock-hour" type="i">
+      <default>18</default>
+      <range min="0" max="23"/>
+      <summary>Auto Stop Clock Hour</summary>
+      <description>Hour of day for the Pomodoro auto stop clock.</description>
+    </key>
+
+    <key name="deepwork-pomodoro-clock-minute" type="i">
+      <default>0</default>
+      <range min="0" max="59"/>
+      <summary>Auto Stop Clock Minute</summary>
+      <description>Minute of hour for the Pomodoro auto stop clock.</description>
+    </key>
+
+    <key name="deepwork-focus-notification-summary-enabled" type="b">
+      <default>false</default>
+      <summary>Focus Notification Summary</summary>
+      <description>Shows a delayed summary notification after focus if notification banners were silenced and notifications arrived.</description>
+    </key>
+
+    <key name="deepwork-pomodoro-show-notification-count" type="b">
+      <default>false</default>
+      <summary>Show Focus Notification Count</summary>
+      <description>Shows the number of silenced focus notifications beside the Pomodoro timer.</description>
+    </key>
+
+    <key name="deepwork-pomodoro-panel-peek-duration" type="i">
+      <default>10</default>
+      <range min="2" max="30"/>
+      <summary>Top Panel Peek Duration</summary>
+      <description>Seconds to temporarily show the hidden top panel from the floating timer.</description>
+    </key>
+
+    <key name="deepwork-pomodoro-floating-x-ratio" type="d">
+      <default>-1.0</default>
+      <summary>Floating Timer X Position</summary>
+      <description>Saved horizontal position of the floating Pomodoro timer as a monitor-relative ratio.</description>
+    </key>
+
+    <key name="deepwork-pomodoro-floating-y-ratio" type="d">
+      <default>-1.0</default>
+      <summary>Floating Timer Y Position</summary>
+      <description>Saved vertical position of the floating Pomodoro timer as a monitor-relative ratio.</description>
+    </key>
+
+    <key name="deepwork-pomodoro-floating-monitor" type="i">
+      <default>-1</default>
+      <summary>Floating Timer Monitor</summary>
+      <description>Last monitor used for the floating Pomodoro timer position.</description>
+    </key>
+
+    <key name="deepwork-pomodoro-floating-vertical" type="b">
+      <default>false</default>
+      <summary>Vertical Floating Panel</summary>
+      <description>When true, lays out the floating Pomodoro panel vertically instead of horizontally.</description>
+    </key>
+
+    <key name="deepwork-pomodoro-floating-show-time" type="b">
+      <default>true</default>
+      <summary>Show Countdown Timer</summary>
+      <description>When true, shows the countdown timer on the floating Pomodoro widget.</description>
+    </key>
+
+    <key name="deepwork-pomodoro-floating-show-clock" type="b">
+      <default>false</default>
+      <summary>Show System Clock</summary>
+      <description>When true, shows the current system clock time on the floating Pomodoro widget.</description>
+    </key>
+
+    <key name="deepwork-pomodoro-floating-collapsed" type="b">
+      <default>false</default>
+      <summary>Collapse Floating Panel</summary>
+      <description>When true, collapses the floating Pomodoro panel to only show the timer/status icon and expand button.</description>
+    </key>
+
+    <key name="deepwork-pomodoro-floating-icon-only" type="b">
+      <default>false</default>
+      <summary>Icon Only Floating Panel</summary>
+      <description>When true, collapses the floating Pomodoro panel further to only show a shrunken alarm clock status icon.</description>
+    </key>
+
+    <!-- Essential Tweaks -->
+    <key name="tweaks-battery-health-sound-enabled" type="b">
+      <default>false</default>
+      <summary>Battery Health Sound</summary>
+      <description>Play a sound and optionally notify when battery charge crosses configured health thresholds.</description>
+    </key>
+
+    <key name="tweaks-battery-health-sound-upper-threshold" type="i">
+      <default>80</default>
+      <range min="50" max="100"/>
+      <summary>Battery Health Upper Threshold</summary>
+      <description>Charge percentage that triggers the unplug reminder while charging.</description>
+    </key>
+
+    <key name="tweaks-battery-health-sound-lower-threshold" type="i">
+      <default>20</default>
+      <range min="5" max="50"/>
+      <summary>Battery Health Lower Threshold</summary>
+      <description>Charge percentage that triggers the plug-in reminder while discharging.</description>
+    </key>
+
+    <key name="tweaks-battery-health-sound-full-charge-enabled" type="b">
+      <default>true</default>
+      <summary>Full Charge Reminder</summary>
+      <description>Alert when the battery reaches full charge while charging.</description>
+    </key>
+
+    <key name="tweaks-battery-health-sound-critical-charge-enabled" type="b">
+      <default>true</default>
+      <summary>Critical Charge Reminder</summary>
+      <description>Alert when the battery drops to a critical charge level while discharging.</description>
+    </key>
+
+    <key name="tweaks-battery-health-sound-play-sound" type="b">
+      <default>true</default>
+      <summary>Play Battery Health Sound</summary>
+      <description>Play a desktop event sound when a battery health threshold is reached.</description>
+    </key>
+
+    <key name="tweaks-battery-health-sound-respect-dnd" type="b">
+      <default>false</default>
+      <summary>Respect Do Not Disturb</summary>
+      <description>Do not play battery health sounds while Do Not Disturb is active.</description>
+    </key>
+
+    <key name="tweaks-battery-health-sound-show-notification" type="b">
+      <default>true</default>
+      <summary>Show Battery Health Notification</summary>
+      <description>Show a desktop notification when a battery health threshold is reached.</description>
+    </key>
+
+    <key name="tweaks-essential-menu-enabled" type="b">
+      <default>true</default>
+      <summary>Essential Menu</summary>
+      <description>Enable a centered floating application launcher menu.</description>
+    </key>
+
+    <key name="tweaks-essential-menu-show-panel-icon" type="b">
+      <default>true</default>
+      <summary>Show Essential Menu Panel Icon</summary>
+      <description>Show an application launcher icon in the top panel.</description>
+    </key>
+
+    <key name="tweaks-essential-menu-shortcut-enabled" type="b">
+      <default>false</default>
+      <summary>Enable Essential Menu Keyboard Shortcut</summary>
+      <description>Open the centered application launcher with the configured keyboard shortcut.</description>
+    </key>
+
+    <key name="tweaks-essential-menu-shortcut" type="as">
+      <default>['&lt;Super&gt;space']</default>
+      <summary>Essential Menu Keyboard Shortcut</summary>
+      <description>Keyboard shortcut used to open the centered application launcher.</description>
+    </key>
+
+    <key name="tweaks-essential-menu-trigger" type="s">
+      <default>''</default>
+      <summary>Open Essential Menu</summary>
+      <description>Internal trigger used to request opening the floating application launcher.</description>
+    </key>
+
+    <key name="tweaks-essential-menu-default-search-engine" type="s">
+      <default>'duckduckgo'</default>
+      <summary>Default Search Engine</summary>
+      <description>Default search engine for web search prefix (duckduckgo, google, or bing).</description>
+    </key>
+
+    <key name="tweaks-essential-menu-animations-enabled" type="b">
+      <default>true</default>
+      <summary>Enable Menu Animations</summary>
+      <description>Toggle hardware-accelerated animations in the centered menu launcher.</description>
+    </key>
+
+    <key name="tweaks-essential-menu-backdrop-dim-enabled" type="b">
+      <default>true</default>
+      <summary>Enable Menu Backdrop Dim</summary>
+      <description>Toggle the dim screen backdrop effect when the centered menu launcher pops open.</description>
+    </key>
+
+    <key name="tweaks-essential-uninstall-enabled" type="b">
+      <default>true</default>
+      <summary>Enable App Uninstallation Utility</summary>
+      <description>Add an 'Uninstall' option to the right-click context menu of applications in the app grid.</description>
+    </key>
+
+    <key name="tweaks-essential-uninstall-in-menu" type="b">
+      <default>true</default>
+      <summary>Show Uninstall Option in Essential Menu</summary>
+      <description>Add an 'Uninstall' button to application search results inside the Essential Menu quick launcher.</description>
+    </key>
+
+    <!-- Workspace Profiles (Workspace Session Restorer) -->
+    <key name="profiles-enabled" type="b">
+      <default>true</default>
+      <summary>Enable Workspace Profiles Module</summary>
+      <description>Allows saving and restoring active window coordinates and workspaces.</description>
+    </key>
+
+    <key name="profiles-auto-launch" type="b">
+      <default>true</default>
+      <summary>Auto-Spawn Applications on Switch</summary>
+      <description>Automatically triggers flatpak or native binaries if applications are not currently running.</description>
+    </key>
+
+    <key name="profiles-saved-data" type="s">
+      <default>"{}"</default>
+      <summary>Serialized Saved Profiles Data</summary>
+      <description>JSON serialized string holding layout configurations.</description>
+    </key>
+
+    <key name="profiles-active-profile" type="s">
+      <default>""</default>
+      <summary>Active Profile Name</summary>
+      <description>The name of the currently selected active profile layout.</description>
+    </key>
+
+    <key name="profiles-trigger-save" type="s">
+      <default>""</default>
+      <summary>Trigger Save Profile Request</summary>
+      <description>Used for IPC between prefs.js and main process to trigger a layout save.</description>
+    </key>
+
+    <key name="profiles-last-operation" type="s">
+      <default>""</default>
+      <summary>Last Profile Operation Result</summary>
+      <description>JSON status payload used to send save, apply, rename, and delete feedback to preferences.</description>
+    </key>
+
+    <key name="profiles-show-notifications" type="b">
+      <default>true</default>
+      <summary>Show Switch Notifications</summary>
+      <description>Show standard desktop notifications when switching workspace profiles.</description>
+    </key>
+
+  </schema>
+</schemalist>

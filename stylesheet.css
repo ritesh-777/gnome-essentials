@@ -1,0 +1,349 @@
+/* GNOME Essentials Custom CSS Stylesheet */
+/* Author: Ritesh Seth */
+
+.pomodoro-indicator {
+    font-weight: bold;
+    font-family: monospace;
+    transition: color 0.25s ease-in-out;
+}
+
+.panel-status-menu-box {
+    spacing: 4px;
+}
+
+.pomodoro-floating-chip {
+    spacing: 4px;
+    padding: 4px;
+    border-radius: 999px;
+    background-color: rgba(32, 34, 42, 0.92);
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.26);
+}
+
+.pomodoro-floating-chip:dragging {
+    background-color: rgba(40, 44, 54, 0.96);
+    border-color: rgba(255, 255, 255, 0.24);
+}
+
+.pomodoro-floating-drag-handle {
+    border-radius: 999px;
+    padding: 4px;
+    color: rgba(245, 245, 245, 0.72);
+    transition: background-color 150ms, color 150ms;
+}
+
+.pomodoro-floating-peek-button {
+    border-radius: 999px;
+    padding: 4px 5px;
+    color: rgba(245, 245, 245, 0.88);
+    transition: background-color 150ms, color 150ms;
+}
+
+.pomodoro-floating-main-button,
+.pomodoro-floating-rotate-button,
+.pomodoro-floating-reset-button,
+.pomodoro-floating-collapse-button {
+    border-radius: 999px;
+    padding: 4px 6px;
+    color: rgba(245, 245, 245, 0.95);
+    transition: background-color 150ms, color 150ms;
+}
+
+.pomodoro-floating-drag-handle:hover,
+.pomodoro-floating-peek-button:hover,
+.pomodoro-floating-main-button:hover,
+.pomodoro-floating-rotate-button:hover,
+.pomodoro-floating-reset-button:hover,
+.pomodoro-floating-collapse-button:hover {
+    background-color: rgba(255, 255, 255, 0.12);
+}
+
+/* Vertical Floating Orientation Styles */
+.pomodoro-floating-chip.vertical {
+    border-radius: 20px;
+    padding: 6px 4px;
+    spacing: 6px;
+}
+
+.pomodoro-floating-main-box.vertical {
+    spacing: 3px;
+}
+
+.pomodoro-floating-drag-icon {
+    icon-size: 12px;
+}
+
+.pomodoro-floating-main-box {
+    spacing: 4px;
+}
+
+.pomodoro-floating-label {
+    font-weight: bold;
+    font-family: monospace;
+    font-size: 10pt;
+    text-align: center;
+}
+
+.pomodoro-floating-icon {
+    icon-size: 14px;
+}
+
+.pomodoro-floating-clock-separator {
+    color: rgba(255, 255, 255, 0.22);
+    font-weight: normal;
+    font-size: 10pt;
+    margin-left: 2px;
+    margin-right: 2px;
+}
+
+.pomodoro-floating-clock-label {
+    color: rgba(255, 255, 255, 0.65);
+    font-weight: normal;
+    font-family: monospace;
+    font-size: 8.5pt;
+    text-align: center;
+}
+
+.pomodoro-floating-main-box.vertical .pomodoro-floating-clock-separator {
+    font-size: 12pt;
+    color: rgba(255, 255, 255, 0.22);
+    margin: 1px 0px;
+    text-align: center;
+}
+
+.pomodoro-floating-main-box.vertical .pomodoro-floating-clock-label {
+    color: rgba(255, 255, 255, 0.55);
+    font-size: 8pt;
+}
+
+.pomodoro-floating-main-box.vertical .pomodoro-count-badge {
+    margin-left: 0px;
+    margin-top: 4px;
+}
+
+.profiles-profile-row {
+    spacing: 8px;
+}
+
+.profiles-profile-name-button {
+    border-radius: 6px;
+    color: rgba(230, 230, 230, 0.88);
+    padding: 5px 8px;
+}
+
+.profiles-profile-name-button:hover,
+.profiles-profile-action-button:hover {
+    background-color: rgba(255, 255, 255, 0.12);
+}
+
+.profiles-profile-action-button {
+    border-radius: 6px;
+    color: rgba(230, 230, 230, 0.82);
+    padding: 6px;
+}
+
+.profiles-profile-action-button.destructive {
+    color: rgba(255, 150, 150, 0.9);
+}
+
+.profiles-rename-dialog StEntry {
+    min-width: 320px;
+    margin-top: 12px;
+}
+
+.profiles-dialog-detail {
+    color: rgba(230, 230, 230, 0.72);
+    margin-top: 8px;
+}
+
+/* Centered Essential Menu Quick Launcher Styles */
+.essential-menu-result {
+    background-color: transparent;
+    border: 1px solid transparent !important;
+    border-radius: 10px;
+    padding: 8px 10px;
+    color: #ededed;
+    transition: background-color 150ms ease-out, color 150ms ease-out, border-color 150ms ease-out, box-shadow 150ms ease-out !important;
+}
+
+.essential-menu-result-selected {
+    background-color: rgba(53, 132, 228, 0.36) !important;
+    border: 1px solid rgba(0, 0, 0, 0.40) !important;
+    color: #ffffff !important;
+    box-shadow: 0 3px 8px rgba(0, 0, 0, 0.24) !important;
+}
+
+/* Time Selector Tweak styles */
+.time-selector-layout {
+    padding: 8px 16px;
+    spacing: 8px;
+}
+
+.time-adjust-button {
+    border-radius: 999px;
+    padding: 4px;
+    background-color: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    color: rgba(255, 255, 255, 0.9);
+    transition: background-color 150ms, border-color 150ms;
+}
+
+.time-adjust-button:hover {
+    background-color: rgba(255, 255, 255, 0.18);
+    border-color: rgba(255, 255, 255, 0.2);
+}
+
+.time-adjust-button:active {
+    background-color: rgba(255, 255, 255, 0.24);
+}
+
+.time-selector-text {
+    min-width: 28px;
+    text-align: center;
+    font-weight: bold;
+    font-size: 11pt;
+    color: #ffffff;
+    margin: 0 4px;
+}
+
+.time-selector-separator {
+    font-weight: bold;
+    font-size: 12pt;
+    margin: 0 10px;
+    color: #ffffff;
+}
+
+.settings-selector-title {
+    font-weight: normal;
+    font-size: 10.5pt;
+    color: #ffffff;
+}
+
+.pomodoro-count-badge {
+    background-color: #ffffff;
+    color: #0c0e17;
+    font-weight: bold;
+    font-size: 8pt;
+    text-align: center;
+    border-radius: 999px;
+    margin-left: 6px;
+    padding: 1px 4px;
+    min-width: 14px;
+    min-height: 14px;
+    border: none;
+    box-shadow: none;
+    transition: background-color 150ms;
+}
+
+.pomodoro-count-badge:hover {
+    background-color: #ededed;
+}
+
+.pomodoro-count-badge:active {
+    background-color: #d1d1d1;
+}
+
+.pomodoro-summary-popover-floating {
+    -boxpointer-gap: 12px;
+}
+
+.essential-menu-light .essential-menu-result {
+    color: #1c1c1e !important;
+    border: 1px solid transparent !important;
+}
+
+.essential-menu-light .essential-menu-result-selected {
+    background-color: rgba(53, 132, 228, 0.16) !important;
+    border: 1px solid rgba(0, 0, 0, 0.12) !important;
+    color: #1c1c1e !important;
+    box-shadow: 0 3px 8px rgba(0, 0, 0, 0.06) !important;
+}
+
+.essential-menu-light StEntry StLabel {
+    color: rgba(0, 0, 0, 0.44) !important;
+}
+
+.essential-menu-launcher {
+    border-radius: 16px !important;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.16), 0 20px 48px rgba(0, 0, 0, 0.38) !important;
+    border: 1px solid rgba(255, 255, 255, 0.20) !important;
+    padding: 12px 12px 18px 12px !important;
+}
+
+.essential-menu-launcher.essential-menu-light {
+    border-radius: 16px !important;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08), 0 16px 40px rgba(0, 0, 0, 0.22) !important;
+    border: 1px solid rgba(255, 255, 255, 0.85) !important;
+    padding: 12px 12px 18px 12px !important;
+}
+
+/* Essential Menu Polished 3D Search Entry */
+.essential-menu-search-entry {
+    background-color: rgba(0, 0, 0, 0.16) !important;
+    border-top: 1.2px solid rgba(0, 0, 0, 0.65) !important;
+    border-left: 1.2px solid rgba(255, 255, 255, 0.08) !important;
+    border-right: 1.2px solid rgba(255, 255, 255, 0.08) !important;
+    border-bottom: 1.2px solid rgba(255, 255, 255, 0.08) !important;
+    border-radius: 12px !important;
+    padding: 10px 12px !important;
+    min-height: 42px !important;
+    color: #ffffff !important;
+    selection-background-color: #3584e4 !important;
+    selected-color: #ffffff !important;
+    transition: background-color 150ms ease-out, border-color 150ms ease-out, box-shadow 150ms ease-out !important;
+    box-shadow: none !important;
+}
+
+.essential-menu-search-entry:focus,
+.essential-menu-search-entry:focused {
+    background-color: rgba(48, 48, 56, 0.94) !important;
+    border: 1.2px solid rgba(255, 255, 255, 0.22) !important;
+    box-shadow: 0 5px 15px rgba(0, 0, 0, 0.55) !important;
+}
+
+/* Light Mode 3D Search Entry */
+.essential-menu-light .essential-menu-search-entry {
+    background-color: rgba(0, 0, 0, 0.08) !important;
+    border-top: 1.2px solid rgba(0, 0, 0, 0.22) !important;
+    border-left: 1.2px solid rgba(255, 255, 255, 0.85) !important;
+    border-right: 1.2px solid rgba(255, 255, 255, 0.85) !important;
+    border-bottom: 1.2px solid rgba(255, 255, 255, 0.85) !important;
+    color: #1c1c1e !important;
+    selection-background-color: #3584e4 !important;
+    selected-color: #ffffff !important;
+    box-shadow: none !important;
+}
+
+.essential-menu-light .essential-menu-search-entry:focus,
+.essential-menu-light .essential-menu-search-entry:focused {
+    background-color: rgba(255, 255, 255, 0.96) !important;
+    border: 1.2px solid rgba(0, 0, 0, 0.16) !important;
+    box-shadow: 0 5px 14px rgba(0, 0, 0, 0.18) !important;
+}
+
+.essential-menu-results-box {
+    spacing: 4px;
+    padding-bottom: 8px;
+}
+
+/* Micro-Focus Dot Mode (Minimized) Styles */
+.pomodoro-floating-chip.minimized {
+    border-radius: 999px !important;
+    padding: 6px !important;
+    spacing: 0px !important;
+    background-color: rgba(32, 34, 42, 0.85) !important;
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.22) !important;
+}
+
+.pomodoro-floating-chip.minimized .pomodoro-floating-main-button {
+    padding: 2px !important;
+    background-color: transparent !important;
+    box-shadow: none !important;
+    border: none !important;
+}
+
+.pomodoro-floating-chip.minimized .pomodoro-floating-main-box {
+    spacing: 0px !important;
+    padding: 0px !important;
+}
+
