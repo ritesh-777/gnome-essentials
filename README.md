@@ -9,6 +9,8 @@ It is built for the small moments that decide whether your desktop feels helpful
 
 GNOME already has a beautiful foundation. GNOME Essentials does not try to replace it. It adds the practical workflow layer that many people end up wishing GNOME had by default.
 
+Some of these problems can be solved with separate extensions. GNOME Essentials exists because the day-to-day experience is different when the pieces are built to work together.
+
 ## Why This Extension Exists
 
 Most desktop utilities solve one tiny problem in isolation. One extension hides the panel. Another manages windows. Another adds a launcher. Another handles focus timers. Over time the desktop becomes a pile of separate tools that do not understand each other.
@@ -18,6 +20,18 @@ GNOME Essentials takes a different approach. It treats the desktop as a complete
 When you enter Deep Work, the timer, top panel, notification banners, ambient dimming, and floating controls should all agree about what is happening. When you save a workspace profile, the extension should understand both ordinary GNOME windows and tiling managers. When you open the launcher, it should be fast enough to become muscle memory.
 
 The result is a set of desktop utilities that feel connected instead of bolted on.
+
+## A Fair Word About Existing Extensions
+
+GNOME has a generous extension ecosystem, and this project respects that. Several ideas in GNOME Essentials live in the same space as existing extensions: launchers, Pomodoro timers, panel hiding, notification helpers, window/session restore, battery reminders, and app uninstall shortcuts all have relatives in other projects.
+
+GNOME Essentials is not presented as if every individual idea began here. That would be unfair to the GNOME community and to the people who have built useful tools before it. The purpose of this project is different: to turn a set of practical desktop habits into one coherent, maintained, GNOME-native workflow.
+
+The hard part is the coordination. A focus timer should know when Deep Work is active. A hidden panel needs a usable control surface. A notification summary should only matter when notifications were actually suppressed. Workspace restore should not treat PaperWM or other tiling extensions like ordinary floating windows. The launcher, battery sounds, and uninstall utility should feel like they belong to the same desktop, not like unrelated parts pulled from different shelves.
+
+If you already have a carefully tuned stack of separate extensions, that is valid. GNOME Essentials is for users who want fewer moving pieces, one settings surface, and features that are designed to cooperate from the beginning.
+
+That is the promise of the project: not novelty for its own sake, but less friction every time you sit down to work.
 
 ## What You Get
 
