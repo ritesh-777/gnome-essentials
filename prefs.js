@@ -93,12 +93,12 @@ export default class GnomeEssentialsPreferences extends ExtensionPreferences {
         };
 
         const normalizeProfilesData = (data) => {
-            const normalized = { version: 2, profiles: {} };
+            const normalized = { version: 2, profiles: {}, safety_snapshot: null };
             if (!data || typeof data !== 'object') return normalized;
 
             const source = data.version === 2 && data.profiles ? data.profiles : data;
             for (const [name, entry] of Object.entries(source)) {
-                if (!name || name === 'version' || name === 'profiles') continue;
+                if (!name || name === 'version' || name === 'profiles' || name === 'safety_snapshot') continue;
 
                 if (Array.isArray(entry)) {
                     normalized.profiles[name] = {
@@ -117,6 +117,19 @@ export default class GnomeEssentialsPreferences extends ExtensionPreferences {
                 }
             }
 
+            if (data.safety_snapshot &&
+                typeof data.safety_snapshot === 'object' &&
+                Array.isArray(data.safety_snapshot.windows)) {
+                const windows = cloneWindowConfigs(data.safety_snapshot.windows);
+                normalized.safety_snapshot = windows.length > 0 ? {
+                    reason: data.safety_snapshot.reason || 'unknown',
+                    source: data.safety_snapshot.source || 'capture',
+                    created_at: data.safety_snapshot.created_at || null,
+                    monitor_signature: data.safety_snapshot.monitor_signature || '',
+                    windows
+                } : null;
+            }
+
             return normalized;
         };
 
@@ -125,7 +138,7 @@ export default class GnomeEssentialsPreferences extends ExtensionPreferences {
                 return normalizeProfilesData(JSON.parse(settings.get_string('profiles-saved-data') || '{}'));
             } catch (e) {
                 setProfileStatus(`Could not read saved profiles: ${e.message}`, true);
-                return { version: 2, profiles: {} };
+                return { version: 2, profiles: {}, safety_snapshot: null };
             }
         };
 
@@ -849,6 +862,29 @@ export default class GnomeEssentialsPreferences extends ExtensionPreferences {
         settings.bind('tweaks-essential-menu-show-panel-icon', essentialMenuPanelIconRow, 'active', Gio.SettingsBindFlags.DEFAULT);
         essentialMenuGroup.add(essentialMenuPanelIconRow);
 
+        const panelPlacementValues = ['before-workspaces', 'after-workspaces'];
+        const essentialMenuPanelPlacementRow = new Adw.ComboRow({
+            title: 'Panel Icon Placement',
+            subtitle: 'Choose the side of the workspace switcher for the top-panel icon.',
+            model: new Gtk.StringList({
+                strings: ['Before Workspace Switcher', 'After Workspace Switcher']
+            })
+        });
+        const syncPanelPlacementRow = () => {
+            const placement = settings.get_string('tweaks-essential-menu-panel-icon-placement') || 'before-workspaces';
+            const index = panelPlacementValues.indexOf(placement);
+            essentialMenuPanelPlacementRow.selected = index >= 0 ? index : 0;
+        };
+        syncPanelPlacementRow();
+        essentialMenuPanelPlacementRow.connect('notify::selected', () => {
+            const index = essentialMenuPanelPlacementRow.selected;
+            if (index >= 0 && index < panelPlacementValues.length) {
+                settings.set_string('tweaks-essential-menu-panel-icon-placement', panelPlacementValues[index]);
+            }
+        });
+        essentialMenuGroup.add(essentialMenuPanelPlacementRow);
+        connectSetting('changed::tweaks-essential-menu-panel-icon-placement', syncPanelPlacementRow);
+
         const essentialMenuShortcutRow = new Adw.SwitchRow({
             title: 'Super+Space Shortcut',
             subtitle: 'Open the floating app menu with Super+Space.',
@@ -987,7 +1023,9 @@ export default class GnomeEssentialsPreferences extends ExtensionPreferences {
 
         const updateEssentialMenuSensitivity = () => {
             const enabled = settings.get_boolean('tweaks-essential-menu-enabled');
+            const panelIconEnabled = settings.get_boolean('tweaks-essential-menu-show-panel-icon');
             essentialMenuPanelIconRow.set_sensitive(enabled);
+            essentialMenuPanelPlacementRow.set_sensitive(enabled && panelIconEnabled);
             essentialMenuShortcutRow.set_sensitive(enabled);
             essentialMenuAnimationsRow.set_sensitive(enabled);
             essentialMenuBackdropDimRow.set_sensitive(enabled);
@@ -997,6 +1035,230 @@ export default class GnomeEssentialsPreferences extends ExtensionPreferences {
         };
         updateEssentialMenuSensitivity();
         connectSetting('changed::tweaks-essential-menu-enabled', updateEssentialMenuSensitivity);
+        connectSetting('changed::tweaks-essential-menu-show-panel-icon', updateEssentialMenuSensitivity);
+
+        const shelfNautilusScriptName = 'Send to Essential Shelf';
+        const shelfNautilusScriptsDir = GLib.build_filenamev([GLib.get_user_data_dir(), 'nautilus', 'scripts']);
+        const shelfNautilusScriptPath = GLib.build_filenamev([shelfNautilusScriptsDir, shelfNautilusScriptName]);
+        const shelfNautilusScript = `#!/bin/sh
+set -eu
+
+DATA_DIR="\${XDG_DATA_HOME:-$HOME/.local/share}/gnome-essentials"
+INBOX="$DATA_DIR/shelf-inbox.jsonl"
+
+mkdir -p "$DATA_DIR"
+
+selection="\${NAUTILUS_SCRIPT_SELECTED_URIS:-}"
+if [ -z "$selection" ]; then
+    selection="\${NAUTILUS_SCRIPT_SELECTED_FILE_PATHS:-}"
+fi
+
+if [ -z "$selection" ]; then
+    if command -v notify-send >/dev/null 2>&1; then
+        notify-send "GNOME Essentials" "No selected files to send to Shelf."
+    fi
+    exit 0
+fi
+
+printf '%s\\n' "$selection" | while IFS= read -r item; do
+    [ -z "$item" ] && continue
+    printf '%s\\n' "$item" >> "$INBOX"
+done
+
+count=$(printf '%s\\n' "$selection" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')
+if command -v notify-send >/dev/null 2>&1; then
+    notify-send "GNOME Essentials" "Sent $count item(s) to Essential Shelf."
+fi
+`;
+
+        const isShelfNautilusScriptInstalled = () => Gio.File.new_for_path(shelfNautilusScriptPath).query_exists(null);
+
+        const installShelfNautilusScript = () => {
+            const dir = Gio.File.new_for_path(shelfNautilusScriptsDir);
+            if (!dir.query_exists(null)) {
+                dir.make_directory_with_parents(null);
+            }
+
+            const file = Gio.File.new_for_path(shelfNautilusScriptPath);
+            file.replace_contents(
+                shelfNautilusScript,
+                null,
+                false,
+                Gio.FileCreateFlags.REPLACE_DESTINATION,
+                null
+            );
+
+            if (typeof GLib.chmod === 'function') {
+                GLib.chmod(shelfNautilusScriptPath, 0o755);
+            } else {
+                file.set_attribute_uint32('unix::mode', 0o755, Gio.FileQueryInfoFlags.NONE, null);
+            }
+        };
+
+        const removeShelfNautilusScript = () => {
+            const file = Gio.File.new_for_path(shelfNautilusScriptPath);
+            if (file.query_exists(null)) {
+                file.delete(null);
+            }
+        };
+
+        const essentialShelfGroup = new Adw.PreferencesGroup({
+            title: 'Essential Shelf',
+            description: 'Keep selected files, folders, links, and text snippets nearby inside Essential Menu.'
+        });
+        tweaksPage.add(essentialShelfGroup);
+
+        const essentialShelfEnabledRow = new Adw.SwitchRow({
+            title: 'Enable Essential Shelf',
+            subtitle: 'Keep selected files, folders, links, and snippets close from Essential Menu.',
+        });
+        settings.bind('tweaks-essential-shelf-enabled', essentialShelfEnabledRow, 'active', Gio.SettingsBindFlags.DEFAULT);
+        essentialShelfGroup.add(essentialShelfEnabledRow);
+
+        const essentialShelfShowInMenuRow = new Adw.SwitchRow({
+            title: 'Show in Essential Menu',
+            subtitle: 'Use # to view kept items and add typed links, paths, or snippets.',
+        });
+        settings.bind('tweaks-essential-shelf-show-in-menu', essentialShelfShowInMenuRow, 'active', Gio.SettingsBindFlags.DEFAULT);
+        essentialShelfGroup.add(essentialShelfShowInMenuRow);
+
+        const essentialShelfNotificationsRow = new Adw.SwitchRow({
+            title: 'Show Notifications',
+            subtitle: 'Show desktop notifications when Shelf items are added, attached, restored, or removed.',
+        });
+        settings.bind('tweaks-essential-shelf-show-notifications', essentialShelfNotificationsRow, 'active', Gio.SettingsBindFlags.DEFAULT);
+        essentialShelfGroup.add(essentialShelfNotificationsRow);
+
+        const essentialShelfPersistRow = new Adw.SwitchRow({
+            title: 'Persist After Restart',
+            subtitle: 'Keep shelf items after logging out or restarting GNOME Shell.',
+        });
+        settings.bind('tweaks-essential-shelf-persist', essentialShelfPersistRow, 'active', Gio.SettingsBindFlags.DEFAULT);
+        essentialShelfGroup.add(essentialShelfPersistRow);
+
+        const shelfMaxAdjustment = new Gtk.Adjustment({
+            value: settings.get_int('tweaks-essential-shelf-max-items'),
+            lower: 4,
+            upper: 80,
+            step_increment: 1,
+            page_increment: 8
+        });
+        settings.bind('tweaks-essential-shelf-max-items', shelfMaxAdjustment, 'value', Gio.SettingsBindFlags.DEFAULT);
+
+        const shelfMaxSpin = new Gtk.SpinButton({
+            adjustment: shelfMaxAdjustment,
+            numeric: true,
+            climb_rate: 1,
+            valign: Gtk.Align.CENTER,
+            width_request: 90
+        });
+
+        const shelfMaxRow = new Adw.ActionRow({
+            title: 'Maximum Items',
+            subtitle: 'Older shelf items are removed when this limit is reached.'
+        });
+        shelfMaxRow.add_suffix(shelfMaxSpin);
+        shelfMaxRow.activatable_widget = shelfMaxSpin;
+        essentialShelfGroup.add(shelfMaxRow);
+
+        let shelfNautilusScriptError = '';
+        const installShelfScriptButton = new Gtk.Button({
+            icon_name: 'document-save-symbolic',
+            valign: Gtk.Align.CENTER,
+            tooltip_text: 'Install Files script'
+        });
+        const removeShelfScriptButton = new Gtk.Button({
+            icon_name: 'user-trash-symbolic',
+            valign: Gtk.Align.CENTER,
+            tooltip_text: 'Remove Files script'
+        });
+        removeShelfScriptButton.add_css_class('destructive-action');
+
+        const shelfNautilusScriptRow = new Adw.ActionRow({
+            title: 'Files Send-to-Shelf Action',
+            subtitle: 'Install a Nautilus script for right-clicking selected files and sending them to Essential Shelf.'
+        });
+        shelfNautilusScriptRow.add_suffix(installShelfScriptButton);
+        shelfNautilusScriptRow.add_suffix(removeShelfScriptButton);
+        essentialShelfGroup.add(shelfNautilusScriptRow);
+
+        const updateShelfNautilusScriptRow = () => {
+            const installed = isShelfNautilusScriptInstalled();
+            shelfNautilusScriptRow.set_subtitle(shelfNautilusScriptError ||
+                (installed
+                    ? `Installed in Files scripts as "${shelfNautilusScriptName}".`
+                    : 'Install a Nautilus script for right-clicking selected files and sending them to Essential Shelf.'));
+            installShelfScriptButton.set_sensitive(!installed);
+            removeShelfScriptButton.set_sensitive(installed);
+        };
+
+        installShelfScriptButton.connect('clicked', () => {
+            try {
+                installShelfNautilusScript();
+                shelfNautilusScriptError = '';
+            } catch (e) {
+                shelfNautilusScriptError = `Install failed: ${e.message}`;
+            }
+            updateShelfNautilusScriptRow();
+        });
+
+        removeShelfScriptButton.connect('clicked', () => {
+            confirmAction(
+                'Remove Files Script?',
+                'Remove the Nautilus script that sends selected files to Essential Shelf?',
+                'Remove',
+                Adw.ResponseAppearance.DESTRUCTIVE,
+                () => {
+                    try {
+                        removeShelfNautilusScript();
+                        shelfNautilusScriptError = '';
+                    } catch (e) {
+                        shelfNautilusScriptError = `Remove failed: ${e.message}`;
+                    }
+                    updateShelfNautilusScriptRow();
+                }
+            );
+        });
+        updateShelfNautilusScriptRow();
+
+        const clearShelfButton = new Gtk.Button({
+            icon_name: 'edit-clear-all-symbolic',
+            valign: Gtk.Align.CENTER,
+            tooltip_text: 'Clear Essential Shelf'
+        });
+        clearShelfButton.add_css_class('destructive-action');
+        clearShelfButton.connect('clicked', () => {
+            confirmAction(
+                'Clear Essential Shelf?',
+                'Remove all temporary shelf items? This does not delete the original files.',
+                'Clear',
+                Adw.ResponseAppearance.DESTRUCTIVE,
+                () => settings.set_string('tweaks-essential-shelf-trigger-clear', operationId())
+            );
+        });
+
+        const clearShelfRow = new Adw.ActionRow({
+            title: 'Clear Shelf',
+            subtitle: 'Remove every item currently stored in Essential Shelf.'
+        });
+        clearShelfRow.add_suffix(clearShelfButton);
+        clearShelfRow.activatable_widget = clearShelfButton;
+        essentialShelfGroup.add(clearShelfRow);
+
+        const updateEssentialShelfSensitivity = () => {
+            const shelfEnabled = settings.get_boolean('tweaks-essential-shelf-enabled');
+            const menuEnabled = settings.get_boolean('tweaks-essential-menu-enabled');
+            essentialShelfShowInMenuRow.set_sensitive(shelfEnabled && menuEnabled);
+            essentialShelfNotificationsRow.set_sensitive(shelfEnabled);
+            essentialShelfPersistRow.set_sensitive(shelfEnabled);
+            shelfMaxRow.set_sensitive(shelfEnabled);
+            shelfNautilusScriptRow.set_sensitive(shelfEnabled);
+            clearShelfRow.set_sensitive(shelfEnabled);
+            updateShelfNautilusScriptRow();
+        };
+        updateEssentialShelfSensitivity();
+        connectSetting('changed::tweaks-essential-shelf-enabled', updateEssentialShelfSensitivity);
+        connectSetting('changed::tweaks-essential-menu-enabled', updateEssentialShelfSensitivity);
 
         const uninstallUtilityGroup = new Adw.PreferencesGroup({
             title: 'App Uninstallation Utility',

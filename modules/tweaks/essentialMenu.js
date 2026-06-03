@@ -7,8 +7,11 @@ import Meta from 'gi://Meta';
 import Pango from 'gi://Pango';
 import Shell from 'gi://Shell';
 import St from 'gi://St';
+import * as DND from 'resource:///org/gnome/shell/ui/dnd.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
+import * as ModalDialog from 'resource:///org/gnome/shell/ui/modalDialog.js';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
+import { classifyAppInstallSource } from './appInstallSource.js';
 
 const DEBUG = true;
 const LAUNCHER_WIDTH = 560;
@@ -18,11 +21,14 @@ const RESULTS_MAX_HEIGHT_RATIO = 0.58;
 const SEARCH_RESULT_LIMIT = 10;
 const RESULT_ICON_SIZE = 28;
 const RESULT_ICON_SLOT_SIZE = 36;
-const RESULT_TEXT_COLUMN_MIN_WIDTH = 320;
+const RESULT_ATTACHMENT_ICON_SIZE = 22;
+const RESULT_ATTACHMENT_ICON_SLOT_SIZE = 28;
+const RESULT_ATTACHMENT_INDENT = 14;
 const SHORTCUT_KEY = 'tweaks-essential-menu-shortcut';
 const CALCULATOR_PREFIX = '=';
 const WEB_SEARCH_PREFIX = '?';
 const FILE_SEARCH_PREFIX = '~';
+const SHELF_PREFIX = '#';
 const CALCULATOR_MAX_EXPRESSION_LENGTH = 120;
 const WEB_SEARCH_URI_PREFIX = 'https://duckduckgo.com/?q=';
 const FILE_SEARCH_RESULT_LIMIT = 12;
@@ -32,6 +38,47 @@ const SCROLL_KEEP_VISIBLE_MARGIN = 12;
 const SCROLL_EASING = 0.12;
 const SHORTCUT_REFRESH_DELAY_MS = 650;
 const SHORTCUT_LATE_REFRESH_DELAY_MS = 2000;
+const PANEL_ICON_REPOSITION_DELAYS_MS = [0, 250, 1500, 4500];
+const PANEL_ICON_SESSION_REPOSITION_DELAYS_MS = [120, 800, 2200, 5000];
+const PANEL_ICON_PLACEMENT_BEFORE_WORKSPACES = 'before-workspaces';
+const PANEL_ICON_PLACEMENT_AFTER_WORKSPACES = 'after-workspaces';
+const CONTEXT_NOTES_DIR_NAME = 'context-notes';
+const CONTEXT_DOUBLE_CLICK_MS = 420;
+const INTERNAL_SHELF_DRAG_THRESHOLD = 8;
+const SHELF_DRAG_AUTO_EXPAND_DELAY_MS = 520;
+const SHELF_DRAG_AUTO_COLLAPSE_DELAY_MS = 700;
+const SHELF_DRAG_AUTO_SCROLL_EDGE_PX = 46;
+const SHELF_DRAG_AUTO_SCROLL_STEP = 24;
+const FOLDER_TITLE_SEARCH_MAX_DEPTH = 4;
+const FOLDER_TITLE_SEARCH_MAX_VISITS = 700;
+const FOLDER_TITLE_SEARCH_MAX_MS = 120;
+const FOLDER_TITLE_SEARCH_SKIP_NAMES = new Set([
+    '.cache', '.config', '.git', '.local', '.var', 'node_modules'
+]);
+const OFFICE_DOCUMENT_EXTENSIONS = new Set([
+    'abw', 'doc', 'docm', 'docx', 'dot', 'dotm', 'dotx', 'fodt', 'html',
+    'htm', 'md', 'odt', 'ott', 'pages', 'rtf', 'sdw', 'stw', 'sxw', 'text',
+    'txt', 'wpd'
+]);
+const OFFICE_SPREADSHEET_EXTENSIONS = new Set([
+    'csv', 'fods', 'gnumeric', 'numbers', 'ods', 'ots', 'sdc', 'slk', 'stc',
+    'sxc', 'tsv', 'xls', 'xlsm', 'xlsx', 'xlt', 'xltm', 'xltx'
+]);
+const OFFICE_PRESENTATION_EXTENSIONS = new Set([
+    'fodp', 'key', 'odp', 'otp', 'pot', 'potm', 'potx', 'pps', 'ppsm',
+    'ppsx', 'ppt', 'pptm', 'pptx', 'sdd', 'sti', 'sxi'
+]);
+const OFFICE_DRAWING_EXTENSIONS = new Set([
+    'cdr', 'dia', 'drawio', 'fodg', 'odg', 'otg', 'pdf', 'sda', 'svg',
+    'vsd', 'vsdx'
+]);
+const OFFICE_DATABASE_EXTENSIONS = new Set([
+    'accdb', 'mdb', 'odb'
+]);
+const PDF_READER_EXTENSIONS = new Set([
+    'cb7', 'cbr', 'cbt', 'cbz', 'djv', 'djvu', 'dvi', 'epub', 'eps',
+    'oxps', 'pdf', 'ps', 'xps'
+]);
 
 const LAUNCHER_STYLE = [
     'background-color: rgba(24, 24, 28, 0.82)',
@@ -302,13 +349,17 @@ export default class EssentialMenu {
     /**
      * Constructs the EssentialMenu instance.
      * @param {Gio.Settings} settings - The GSettings manager object.
+     * @param {Object|null} shelf - Optional Essential Shelf storage module.
      */
-    constructor(settings) {
+    constructor(settings, shelf = null) {
         this._settings = settings;
+        this._shelf = null;
+        this._shelfChangedHandlerId = 0;
         this._appSystem = Shell.AppSystem.get_default();
         this._indicator = null;
         this._indicatorMenuOpenId = 0;
         this._panelClickConnections = [];
+        this._floatingDropActor = null;
         this._launcher = null;
         this._searchEntry = null;
         this._resultsScrollView = null;
@@ -334,15 +385,44 @@ export default class EssentialMenu {
         this._shortcutRegistered = false;
         this._shortcutRefreshTimeoutId = 0;
         this._shortcutLateRefreshTimeoutId = 0;
+        this._panelIconRepositionTimeoutIds = [];
         this._fileSearchTimeoutId = 0;
         this._fileSearchGeneration = 0;
         this._fileSearchProcess = null;
         this._fileSearchCancellable = null;
+        this._xdndDragBeginId = 0;
+        this._xdndDragEndId = 0;
+        this._externalDndMonitor = null;
+        this._externalDndMonitoring = false;
+        this._externalDndTarget = '';
+        this._externalDndTargetRow = '';
+        this._externalDndDropHandled = false;
+        this._externalDndSelectionRequested = false;
+        this._externalDndSelectionPending = false;
+        this._externalDndCachedValues = [];
+        this._externalDndCachedMimetype = '';
+        this._externalDndPendingImportTarget = '';
+        this._internalShelfDragMonitor = null;
+        this._internalShelfDragMonitoring = false;
+        this._internalShelfDragTarget = '';
+        this._internalShelfDragSourceButton = null;
+        this._internalShelfDragGraceUntilMs = 0;
+        this._manualShelfDrag = null;
+        this._shelfDragAutoExpandTimeoutId = 0;
+        this._shelfDragAutoExpandTargetId = '';
+        this._shelfDragAutoExpanded = new Map();
+        this._shelfDragAutoCollapseTimeouts = new Map();
+        this._suppressNextResultClick = false;
+        this._suppressNextResultClickTimeoutId = 0;
+        this._lastContextClickId = '';
+        this._lastContextClickTimeMs = 0;
         this._scrollTargetValue = 0;
         this._scrollTimeline = null;
         this._themeSyncTimerId = 0;
         this._scrollIdleId = 0;
         this._isAnimatingOpen = false;
+
+        this.setShelf(shelf);
     }
 
     /**
@@ -351,10 +431,13 @@ export default class EssentialMenu {
      * @returns {void}
      */
     enable() {
+        global.gnome_essentials_menu = this;
         this._connectSettings();
         this._connectAppSignals();
+        this._connectExternalDndSignals();
         this._rebuildAppIndex();
         this._syncPanelIcon();
+        global.gnome_essentials_deepwork?._registerFloatingEssentialMenuDropActor?.();
 
         // Eagerly pre-create and warm up the launcher layout in the background
         try {
@@ -372,14 +455,60 @@ export default class EssentialMenu {
      * @returns {void}
      */
     disable() {
+        if (global.gnome_essentials_menu === this) {
+            global.gnome_essentials_menu = null;
+        }
+        this.setFloatingDropActor(null);
         this.close(true);
+        this.setShelf(null);
+        this._cancelPanelIconReposition();
         this._cancelShortcutRefresh();
         this._unregisterShortcut();
         this._destroyLauncher();
         this._destroyPanelIcon();
+        this._stopInternalShelfDragMonitor();
+        this._disconnectExternalDndSignals();
         this._disconnectAppSignals();
         this._disconnectSettings();
         this._settings = null;
+    }
+
+    setFloatingDropActor(actor) {
+        this._floatingDropActor = actor || null;
+    }
+
+    setShelf(shelf) {
+        if (this._shelf && this._shelfChangedHandlerId > 0) {
+            try {
+                this._shelf.disconnectChanged(this._shelfChangedHandlerId);
+            } catch (e) {
+                // Shelf may already be disabled.
+            }
+        }
+
+        this._shelf = shelf || null;
+        this._shelfChangedHandlerId = 0;
+
+        if (this._shelf && typeof this._shelf.connectChanged === 'function') {
+            this._shelfChangedHandlerId = this._shelf.connectChanged(() => {
+                if (this._isOpen) this._renderResults(this._getSearchText());
+            });
+        }
+
+        if (this._isOpen) this._renderResults(this._getSearchText());
+    }
+
+    _shelfNotificationsEnabled() {
+        try {
+            return this._settings?.get_boolean('tweaks-essential-shelf-show-notifications') ?? true;
+        } catch (e) {
+            return true;
+        }
+    }
+
+    _notifyShelf(message) {
+        if (!this._shelfNotificationsEnabled()) return;
+        Main.notify('Essential Shelf', message);
     }
 
     toggle() {
@@ -548,6 +677,10 @@ export default class EssentialMenu {
     close(immediate = false) {
         if (!this._isOpen && !immediate) return;
         if (!this._launcher) return;
+        if (!immediate && this._isInternalShelfDragActive()) {
+            log('Ignoring menu close during internal Shelf drag');
+            return;
+        }
 
         this._isOpen = false;
         if (this._themeSyncTimerId > 0) {
@@ -563,6 +696,10 @@ export default class EssentialMenu {
         this._cancelFileSearch();
         this._cancelScrollAnimation();
         this._cancelScrollIdle();
+        this._cancelShelfDragAutoExpand();
+        this._collapseAllShelfDragAutoExpanded();
+        this._cancelManualShelfDrag(false);
+        this._stopInternalShelfDragMonitor();
         this._launcher.remove_all_transitions();
 
         if (this._blurBackground) {
@@ -660,9 +797,15 @@ export default class EssentialMenu {
         };
 
         bindKey('tweaks-essential-menu-show-panel-icon', () => this._syncPanelIcon());
+        bindKey('tweaks-essential-menu-panel-icon-placement', () => {
+            this._syncPanelIconPlacement();
+        });
         bindKey('tweaks-essential-menu-shortcut-enabled', () => this._syncShortcut());
         bindKey(SHORTCUT_KEY, () => this._syncShortcut());
         bindKey('tweaks-essential-menu-trigger', () => this._openFromTrigger());
+        bindKey('tweaks-essential-shelf-show-in-menu', () => {
+            if (this._isOpen) this._renderResults(this._getSearchText());
+        });
     }
 
     _disconnectSettings() {
@@ -699,6 +842,7 @@ export default class EssentialMenu {
 
         try {
             this._monitorsChangedId = Main.layoutManager.connect('monitors-changed', () => {
+                this._schedulePanelIconReposition([120, 800]);
                 if (this._isOpen) this._positionLauncher();
             });
         } catch (e) {
@@ -707,7 +851,7 @@ export default class EssentialMenu {
 
         try {
             this._focusWindowChangedId = global.display.connect('notify::focus-window', () => {
-                if (this._isOpen) this.close();
+                if (this._isOpen && !this._isInternalShelfDragActive()) this.close();
             });
         } catch (e) {
             this._focusWindowChangedId = 0;
@@ -716,6 +860,7 @@ export default class EssentialMenu {
         try {
             this._stageKeyFocusChangedId = global.stage.connect('notify::key-focus', () => {
                 if (!this._isOpen) return;
+                if (this._isInternalShelfDragActive()) return;
 
                 const focusActor = this._getStageKeyFocus();
                 if (!focusActor ||
@@ -793,14 +938,230 @@ export default class EssentialMenu {
         }
     }
 
+    _connectExternalDndSignals() {
+        this._disconnectExternalDndSignals();
+
+        if (!Main.xdndHandler) return;
+
+        try {
+            this._externalDndMonitor = {
+                dragMotion: this._onExternalDndMotion.bind(this),
+                dragDrop: this._onExternalDndDrop.bind(this),
+            };
+            this._xdndDragBeginId = Main.xdndHandler.connect('drag-begin', () => {
+                this._startExternalDndMonitor();
+            });
+            this._xdndDragEndId = Main.xdndHandler.connect('drag-end', () => {
+                this._finishExternalDndDrag();
+            });
+        } catch (e) {
+            logError(`Failed to connect external drag-and-drop: ${e.message}`);
+            this._xdndDragBeginId = 0;
+            this._xdndDragEndId = 0;
+            this._externalDndMonitor = null;
+        }
+    }
+
+    _disconnectExternalDndSignals() {
+        this._stopExternalDndMonitor();
+
+        if (this._xdndDragBeginId > 0) {
+            try {
+                Main.xdndHandler?.disconnect(this._xdndDragBeginId);
+            } catch (e) {
+                // The Shell DND handler may already be gone during teardown.
+            }
+            this._xdndDragBeginId = 0;
+        }
+
+        if (this._xdndDragEndId > 0) {
+            try {
+                Main.xdndHandler?.disconnect(this._xdndDragEndId);
+            } catch (e) {
+                // The Shell DND handler may already be gone during teardown.
+            }
+            this._xdndDragEndId = 0;
+        }
+
+        this._externalDndMonitor = null;
+        this._externalDndTarget = '';
+        this._externalDndTargetRow = '';
+    }
+
+    _startExternalDndMonitor() {
+        if (this._externalDndMonitoring || !this._externalDndMonitor) return;
+
+        try {
+            this._externalDndDropHandled = false;
+            this._resetExternalDndSelectionCache();
+            DND.addDragMonitor(this._externalDndMonitor);
+            this._externalDndMonitoring = true;
+        } catch (e) {
+            logError(`Failed to start external drag monitor: ${e.message}`);
+            this._externalDndMonitoring = false;
+        }
+    }
+
+    _stopExternalDndMonitor() {
+        if (!this._externalDndMonitoring || !this._externalDndMonitor) {
+            this._externalDndTarget = '';
+            this._externalDndTargetRow = '';
+            this._externalDndDropHandled = false;
+            if (!this._externalDndSelectionPending) {
+                this._resetExternalDndSelectionCache();
+            }
+            this._syncExternalDndVisuals('');
+            return;
+        }
+
+        try {
+            DND.removeDragMonitor(this._externalDndMonitor);
+        } catch (e) {
+            // The monitor may already have been removed by Shell teardown.
+        }
+
+        this._externalDndMonitoring = false;
+        this._externalDndTarget = '';
+        this._externalDndTargetRow = '';
+        this._externalDndDropHandled = false;
+        if (!this._externalDndSelectionPending) {
+            this._resetExternalDndSelectionCache();
+        }
+        this._syncExternalDndVisuals('');
+    }
+
+    _finishExternalDndDrag() {
+        const target = this._externalDndTarget;
+        const shouldImport = target && !this._externalDndDropHandled;
+        if (shouldImport) {
+            this._externalDndDropHandled = true;
+            this._importExternalDndSelection(target);
+        }
+
+        this._stopExternalDndMonitor();
+    }
+
+    _onExternalDndMotion(dragEvent) {
+        const target = this._getExternalDndTarget(dragEvent);
+        this._externalDndTarget = target;
+        this._syncExternalDndVisuals(target);
+        if (target) this._primeExternalDndSelection();
+
+        return target
+            ? DND.DragMotionResult.COPY_DROP
+            : DND.DragMotionResult.CONTINUE;
+    }
+
+    _onExternalDndDrop(dragEvent) {
+        const target = this._getExternalDndTarget(dragEvent) || this._externalDndTarget;
+        this._externalDndTarget = '';
+        this._syncExternalDndVisuals('');
+
+        if (!target) {
+            return DND.DragDropResult?.CONTINUE ?? DND.DragMotionResult.CONTINUE;
+        }
+
+        this._externalDndDropHandled = true;
+        this._importExternalDndSelection(target);
+        // Let Shell finish its normal drag-end cleanup after we queue the import.
+        return DND.DragDropResult?.CONTINUE ?? DND.DragMotionResult.CONTINUE;
+    }
+
+    _getExternalDndTarget(dragEvent) {
+        const x = Number(dragEvent?.x ?? 0);
+        const y = Number(dragEvent?.y ?? 0);
+
+        if (this._isOpen && this._pointInsideActor(this._launcher, x, y)) {
+            const rowTarget = this._getShelfDndTargetAt(x, y);
+            if (rowTarget) return rowTarget;
+            return 'menu';
+        }
+
+        if (this._pointInsideActor(this._indicator, x, y) ||
+            this._pointInsideActor(this._floatingDropActor, x, y)) {
+            return 'panel';
+        }
+
+        return '';
+    }
+
+    _getShelfDndTargetAt(x, y) {
+        if (!this._isOpen || !Array.isArray(this._resultButtons)) return '';
+
+        for (const button of this._resultButtons) {
+            if (!button?.visible || !button._shelfDndTarget) continue;
+            if (this._pointInsideActor(button, x, y)) {
+                return button._shelfDndTarget;
+            }
+        }
+
+        return '';
+    }
+
+    _syncExternalDndVisuals(target) {
+        this._externalDndTargetRow = target && target !== 'menu' && target !== 'panel'
+            ? target
+            : '';
+
+        try {
+            if (target && target !== 'panel') {
+                this._launcher?.add_style_pseudo_class?.('drop');
+            } else {
+                this._launcher?.remove_style_pseudo_class?.('drop');
+            }
+        } catch (e) {
+            // Visual hint only.
+        }
+
+        try {
+            if (target === 'panel') {
+                this._indicator?.add_style_pseudo_class?.('active');
+                this._floatingDropActor?.add_style_pseudo_class?.('active');
+            } else {
+                this._indicator?.remove_style_pseudo_class?.('active');
+                this._floatingDropActor?.remove_style_pseudo_class?.('active');
+            }
+        } catch (e) {
+            // Visual hint only.
+        }
+
+        try {
+            for (const button of this._resultButtons || []) {
+                if (button?._shelfDndTarget && button._shelfDndTarget === this._externalDndTargetRow) {
+                    button.add_style_pseudo_class?.('drop');
+                } else {
+                    button?.remove_style_pseudo_class?.('drop');
+                }
+            }
+        } catch (e) {
+            // Per-row visual hint only.
+        }
+    }
+
     _syncPanelIcon() {
         const showIcon = this._settings?.get_boolean('tweaks-essential-menu-show-panel-icon') ?? true;
 
         if (showIcon) this._ensurePanelIcon();
         else {
             this.close(true);
+            this._cancelPanelIconReposition();
             this._destroyPanelIcon();
         }
+    }
+
+    _syncPanelIconPlacement() {
+        const showIcon = this._settings?.get_boolean('tweaks-essential-menu-show-panel-icon') ?? true;
+        if (!showIcon) return;
+
+        log(`Panel icon placement changed to ${this._getPanelIconPlacement()}; rebuilding panel indicator`);
+
+        if (!this._indicator) {
+            this._ensurePanelIcon();
+            return;
+        }
+
+        this._destroyPanelIcon();
+        this._ensurePanelIcon();
     }
 
     _openFromTrigger() {
@@ -925,6 +1286,8 @@ export default class EssentialMenu {
         } catch (e) {}
 
         this._scheduleShortcutRefresh(SHORTCUT_REFRESH_DELAY_MS, true);
+        this._syncPanelIcon();
+        this._schedulePanelIconReposition(PANEL_ICON_SESSION_REPOSITION_DELAYS_MS);
     }
 
     _canOpenFromShortcut() {
@@ -946,6 +1309,8 @@ export default class EssentialMenu {
 
     _ensurePanelIcon() {
         if (this._indicator) return;
+
+        this._clearPanelStatusAreaRole();
 
         this._indicator = new PanelMenu.Button(0.0, 'Essentials Quick Launcher', false);
         const box = new St.BoxLayout({
@@ -971,7 +1336,9 @@ export default class EssentialMenu {
             this.toggle();
         });
 
-        Main.panel.addToStatusArea('gnome-essential-menu', this._indicator, 1, 'left');
+        Main.panel.addToStatusArea('gnome-essential-menu', this._indicator, this._getPanelIconInitialPosition(), 'left');
+        this._schedulePanelIconReposition(PANEL_ICON_REPOSITION_DELAYS_MS);
+        global.gnome_essentials_deepwork?._registerFloatingEssentialMenuDropActor?.();
         log('Panel icon added');
     }
 
@@ -979,6 +1346,8 @@ export default class EssentialMenu {
         if (!this._indicator) return;
 
         try {
+            const indicator = this._indicator;
+            this._cancelPanelIconReposition();
             for (const [actor, id] of this._panelClickConnections) {
                 try {
                     actor.disconnect(id);
@@ -991,12 +1360,152 @@ export default class EssentialMenu {
             if (this._indicatorMenuOpenId > 0) {
                 this._indicator.menu.disconnect(this._indicatorMenuOpenId);
             }
+            this._clearPanelStatusAreaRole(indicator);
             this._indicator.destroy();
         } catch (e) {
             // Indicator may already be gone during Shell teardown.
         }
         this._indicator = null;
         this._indicatorMenuOpenId = 0;
+    }
+
+    _clearPanelStatusAreaRole(indicator = null) {
+        try {
+            const statusArea = Main.panel?.statusArea;
+            if (!statusArea?.['gnome-essential-menu']) return;
+            if (indicator && statusArea['gnome-essential-menu'] !== indicator) return;
+            delete statusArea['gnome-essential-menu'];
+        } catch (e) {
+            // Status area bookkeeping is best-effort during Shell teardown.
+        }
+    }
+
+    _schedulePanelIconReposition(delaysMs = [0]) {
+        this._cancelPanelIconReposition();
+
+        const delays = Array.isArray(delaysMs) ? delaysMs : [delaysMs];
+        for (const delay of delays) {
+            const timeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, Math.max(0, delay), () => {
+                this._panelIconRepositionTimeoutIds = this._panelIconRepositionTimeoutIds
+                    .filter(id => id !== timeoutId);
+                this._repositionPanelIcon();
+                return GLib.SOURCE_REMOVE;
+            });
+            this._panelIconRepositionTimeoutIds.push(timeoutId);
+        }
+    }
+
+    _cancelPanelIconReposition() {
+        for (const id of this._panelIconRepositionTimeoutIds || []) {
+            try {
+                GLib.source_remove(id);
+            } catch (e) {
+                // Source may already have fired.
+            }
+        }
+        this._panelIconRepositionTimeoutIds = [];
+    }
+
+    _repositionPanelIcon() {
+        const actor = this._indicator?.container || this._indicator;
+        const leftBox = Main.panel?._leftBox;
+        if (!actor || !leftBox || typeof leftBox.get_children !== 'function') return;
+
+        const parent = actor.get_parent?.();
+        if (parent !== leftBox) return;
+
+        const children = leftBox.get_children();
+        const currentIndex = children.indexOf(actor);
+        if (currentIndex < 0) return;
+
+        const siblings = children.filter(child => child !== actor);
+        const workspaceActor = this._findWorkspacePanelActor(leftBox, actor);
+        const workspaceIndex = workspaceActor ? siblings.indexOf(workspaceActor) : -1;
+        const placement = this._getPanelIconPlacement();
+        let targetIndex;
+
+        if (placement === PANEL_ICON_PLACEMENT_AFTER_WORKSPACES) {
+            targetIndex = workspaceIndex >= 0 ? workspaceIndex + 1 : Math.min(1, siblings.length);
+        } else {
+            targetIndex = workspaceIndex >= 0 ? workspaceIndex : 0;
+        }
+
+        targetIndex = Math.max(0, Math.min(targetIndex, siblings.length));
+
+        if (currentIndex === targetIndex) return;
+
+        try {
+            leftBox.remove_child(actor);
+            if (targetIndex >= siblings.length) {
+                leftBox.add_child(actor);
+            } else {
+                leftBox.insert_child_at_index(actor, targetIndex);
+            }
+            log(`Panel icon positioned ${placement}; current=${currentIndex}, target=${targetIndex}, workspace=${workspaceIndex}`);
+        } catch (e) {
+            logError(`Failed to pin panel icon position: ${e.message}`);
+        }
+    }
+
+    _getPanelIconPlacement() {
+        try {
+            const placement = this._settings?.get_string('tweaks-essential-menu-panel-icon-placement') || '';
+            return placement === PANEL_ICON_PLACEMENT_AFTER_WORKSPACES
+                ? PANEL_ICON_PLACEMENT_AFTER_WORKSPACES
+                : PANEL_ICON_PLACEMENT_BEFORE_WORKSPACES;
+        } catch (e) {
+            return PANEL_ICON_PLACEMENT_BEFORE_WORKSPACES;
+        }
+    }
+
+    _getPanelIconInitialPosition() {
+        return this._getPanelIconPlacement() === PANEL_ICON_PLACEMENT_AFTER_WORKSPACES ? 1 : 0;
+    }
+
+    _findWorkspacePanelActor(leftBox, skipActor = null) {
+        const statusArea = Main.panel?.statusArea || {};
+        const preferredRoles = [
+            'WorkspaceMenu',
+            'workspaceIndicator',
+            'workspace-indicator',
+            'workspaceMenu',
+            'workspacesMenu'
+        ];
+
+        for (const role of preferredRoles) {
+            const actor = this._panelActorFromIndicator(statusArea[role]);
+            if (actor && actor !== skipActor && actor.get_parent?.() === leftBox) return actor;
+        }
+
+        for (const [role, indicator] of Object.entries(statusArea)) {
+            if (!/workspace/i.test(role)) continue;
+            const actor = this._panelActorFromIndicator(indicator);
+            if (actor && actor !== skipActor && actor.get_parent?.() === leftBox) return actor;
+        }
+
+        try {
+            return leftBox.get_children()
+                .find(child => child !== skipActor && this._actorLooksLikeWorkspaceIndicator(child)) || null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    _panelActorFromIndicator(indicator) {
+        if (!indicator) return null;
+        return indicator.container || indicator.actor || indicator;
+    }
+
+    _actorLooksLikeWorkspaceIndicator(actor) {
+        try {
+            const name = String(actor?.name || actor?.get_name?.() || '').toLowerCase();
+            const styleClass = String(actor?.style_class || actor?.get_style_class_name?.() || '').toLowerCase();
+            return name.includes('workspace') ||
+                styleClass.includes('workspace-indicator') ||
+                styleClass.includes('space-workspace-indicator');
+        } catch (e) {
+            return false;
+        }
     }
 
     _connectPanelClickActor(actor, label) {
@@ -1147,6 +1656,8 @@ export default class EssentialMenu {
         this._cancelFileSearch();
         this._cancelScrollAnimation();
         this._cancelScrollIdle();
+        this._cancelShelfDragAutoExpand();
+        this._collapseAllShelfDragAutoExpanded();
 
         if (this._themeSyncTimerId > 0) {
             try {
@@ -1312,12 +1823,24 @@ export default class EssentialMenu {
             style: `spacing: 16px; padding-top: 8px; border-top: 1px solid ${this._isDark ? 'rgba(255, 255, 255, 0.08)' : 'rgba(0, 0, 0, 0.08)'}; margin-top: 6px`
         });
 
-        const createHelpBadge = (prefix, labelText) => {
+        const createHelpBadge = (prefix, labelText, searchPrefix) => {
+            const normalStyle = this._isDark
+                ? 'padding: 2px 8px; background-color: rgba(255, 255, 255, 0.06); border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.08);'
+                : 'padding: 2px 8px; background-color: rgba(0, 0, 0, 0.04); border-radius: 6px; border: 1px solid rgba(0, 0, 0, 0.06);';
+            const hoverStyle = this._isDark
+                ? 'padding: 2px 8px; background-color: rgba(255, 255, 255, 0.12); border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.16);'
+                : 'padding: 2px 8px; background-color: rgba(0, 0, 0, 0.08); border-radius: 6px; border: 1px solid rgba(0, 0, 0, 0.10);';
+
+            const button = new St.Button({
+                reactive: true,
+                can_focus: true,
+                track_hover: true,
+                accessible_name: `${labelText} mode`,
+                style: normalStyle
+            });
             const badgeBox = new St.BoxLayout({
                 vertical: false,
-                style: this._isDark
-                    ? 'spacing: 6px; padding: 2px 8px; background-color: rgba(255, 255, 255, 0.06); border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.08)'
-                    : 'spacing: 6px; padding: 2px 8px; background-color: rgba(0, 0, 0, 0.04); border-radius: 6px; border: 1px solid rgba(0, 0, 0, 0.06)'
+                style: 'spacing: 6px'
             });
             const prefixLabel = new St.Label({
                 text: prefix,
@@ -1329,12 +1852,18 @@ export default class EssentialMenu {
             });
             badgeBox.add_child(prefixLabel);
             badgeBox.add_child(textLabel);
-            return badgeBox;
+            button.set_child(badgeBox);
+            button.connect('clicked', () => this._activateSearchMode(searchPrefix));
+            button.connect('notify::hover', () => {
+                button.style = button.hover ? hoverStyle : normalStyle;
+            });
+            return button;
         };
 
-        helpRow.add_child(createHelpBadge(' = ', 'Calculator'));
-        helpRow.add_child(createHelpBadge(' ? ', 'Web Search'));
-        helpRow.add_child(createHelpBadge(' ~ ', 'File Search'));
+        helpRow.add_child(createHelpBadge(' = ', 'Calculator', CALCULATOR_PREFIX));
+        helpRow.add_child(createHelpBadge(' ? ', 'Web Search', WEB_SEARCH_PREFIX));
+        helpRow.add_child(createHelpBadge(' ~ ', 'File Search', FILE_SEARCH_PREFIX));
+        helpRow.add_child(createHelpBadge(' # ', 'Shelf', SHELF_PREFIX));
         this._launcher.add_child(helpRow);
     }
 
@@ -1470,17 +1999,24 @@ export default class EssentialMenu {
                 const description = this._getAppDescription(app);
                 const keywords = this._getAppKeywords(app);
                 const iconName = this._getAppIconName(app, id);
+                const appInfo = app.get_app_info?.();
+                const desktopPath = appInfo?.get_filename?.() || '';
+                const installSource = classifyAppInstallSource(id, desktopPath, appInfo);
+                const sourceLabel = installSource.sourceLabel || 'Native package';
                 records.push({
                     app,
                     id,
                     name,
                     description,
                     iconName,
+                    installSource,
                     favorite: this._favoriteIds.includes(id),
                     haystack: normalize([
                         name,
                         description,
                         id,
+                        sourceLabel,
+                        installSource.details,
                         ...keywords
                     ].join(' '))
                 });
@@ -1586,6 +2122,11 @@ export default class EssentialMenu {
             return;
         }
 
+        if (rawQuery.startsWith(SHELF_PREFIX)) {
+            this._renderShelfResult(rawQuery.slice(SHELF_PREFIX.length).trim());
+            return;
+        }
+
         if (normalizedQuery) {
             const results = this._searchAppRecords(normalizedQuery).slice(0, SEARCH_RESULT_LIMIT);
             
@@ -1632,6 +2173,7 @@ export default class EssentialMenu {
 
         const showSeparator = (favorites.length > 0 && remaining.length > 0);
         if (this._sectionSeparator) {
+            this._setSectionSeparatorLabel('All apps');
             this._sectionSeparator.visible = showSeparator;
             if (showSeparator) {
                 this._setSeparatorIndex(favorites.length);
@@ -1690,6 +2232,8 @@ export default class EssentialMenu {
             name: `Search with ${engineName} for "${query}"`,
             description: `Open query in default browser using ${engineName}`,
             iconName: 'web-browser-symbolic',
+            uri: this._buildWebSearchUri(query),
+            shelfLabel: `${engineName}: ${query}`,
             query
         });
         this._updateSelection();
@@ -1803,38 +2347,116 @@ export default class EssentialMenu {
             const name = file.get_basename() || uri;
             const fileType = file.query_file_type(Gio.FileQueryInfoFlags.NONE, null);
             const isFolder = fileType === Gio.FileType.DIRECTORY;
+            const info = this._queryFileInfo(file);
+            const previewGIcon = this._getFilePreviewGIcon(file, info);
             const description = isFolder
                 ? `Folder - ${this._shortenHomePath(path || uri)}`
                 : this._shortenHomePath(path || uri);
 
-            return {
+            const record = {
                 kind: 'file',
                 id: uri,
                 name,
                 description,
                 iconName: isFolder ? 'folder-symbolic' : 'text-x-generic-symbolic',
-                gicon: this._getFileGIcon(file, isFolder),
+                gicon: this._getFileGIcon(file, isFolder, info),
+                contentType: this._getContentType(info),
                 uri
             };
+            if (previewGIcon) {
+                record.previewGIcon = previewGIcon;
+                record.hasThumbnail = true;
+            }
+            return record;
         } catch (e) {
             logError(`Failed to read file search result ${uri}: ${e.message}`);
             return null;
         }
     }
 
-    _getFileGIcon(file, isFolder) {
+    _queryFileInfo(file) {
         try {
-            const info = file.query_info(
-                'standard::icon',
+            return file.query_info(
+                'standard::icon,standard::content-type,thumbnail::path,thumbnail::is-valid',
                 Gio.FileQueryInfoFlags.NONE,
                 null
             );
+        } catch (e) {
+            return null;
+        }
+    }
+
+    _getFileGIcon(file, isFolder, info = null) {
+        try {
+            if (!info) info = this._queryFileInfo(file);
             return info.get_icon();
         } catch (e) {
             return isFolder
                 ? Gio.ThemedIcon.new('folder-symbolic')
                 : Gio.ThemedIcon.new('text-x-generic-symbolic');
         }
+    }
+
+    _getFilePreviewGIcon(file, info = null) {
+        try {
+            if (!info) info = this._queryFileInfo(file);
+            const thumbnailPath = this._getThumbnailPath(info);
+            if (thumbnailPath) {
+                const thumbnailFile = Gio.File.new_for_path(thumbnailPath);
+                if (thumbnailFile.query_exists(null)) {
+                    return Gio.FileIcon.new(thumbnailFile);
+                }
+            }
+
+            const contentType = this._getContentType(info);
+            if (this._isImageContentType(contentType) && file.query_exists(null)) {
+                return Gio.FileIcon.new(file);
+            }
+        } catch (e) {
+            // Generic icons remain available through _getFileGIcon().
+        }
+
+        return null;
+    }
+
+    _getThumbnailPath(info) {
+        if (!info) return '';
+
+        try {
+            if (typeof info.has_attribute === 'function' &&
+                info.has_attribute('thumbnail::is-valid') &&
+                !info.get_attribute_boolean('thumbnail::is-valid')) {
+                return '';
+            }
+        } catch (e) {
+            // Missing thumbnail metadata is normal.
+        }
+
+        try {
+            if (typeof info.has_attribute === 'function' &&
+                !info.has_attribute('thumbnail::path')) {
+                return '';
+            }
+            if (typeof info.get_attribute_type === 'function' &&
+                info.get_attribute_type('thumbnail::path') !== Gio.FileAttributeType.STRING) {
+                return '';
+            }
+            return String(info.get_attribute_string('thumbnail::path') ?? '').trim();
+        } catch (e) {
+            return '';
+        }
+    }
+
+    _getContentType(info) {
+        try {
+            return String(info?.get_content_type?.() ?? '').trim();
+        } catch (e) {
+            return '';
+        }
+    }
+
+    _isImageContentType(contentType) {
+        return String(contentType ?? '').startsWith('image/');
     }
 
     _renderFileSearchRecords(query, generation, records, errorMessage = '') {
@@ -1878,12 +2500,228 @@ export default class EssentialMenu {
         this._updateResultsHeight();
     }
 
+    _renderShelfResult(query) {
+        if (!this._isShelfAvailable()) {
+            this._showInfoLabel('Essential Shelf is disabled');
+            this._updateResultsHeight();
+            return;
+        }
+
+        const normalizedQuery = normalize(query).trim();
+        const items = this._shelf.getItems();
+        const filteredItems = normalizedQuery
+            ? items.filter(item => this._shelfItemMatchesQuery(item, normalizedQuery))
+            : items;
+
+        let poolIndex = 0;
+
+        if (query) {
+            this._populatePoolButton(poolIndex, this._createShelfAddRecord(query));
+            poolIndex++;
+        }
+
+        for (const item of filteredItems) {
+            const record = this._shelf.createRecord(item);
+            if (!record) continue;
+            this._decorateShelfTreeRecord(record, {
+                depth: 0,
+                collapsible: this._shelfItemHasChildren(item),
+                collapsed: !!item.collapsed,
+                dndTarget: item.type === 'app'
+                    ? `app:${item.id}`
+                    : item.type === 'workspace'
+                        ? `workspace:${item.id}`
+                        : ''
+            });
+            this._populatePoolButton(poolIndex, record);
+            poolIndex++;
+
+            if (item.type === 'app' && Array.isArray(item.attachments)) {
+                const attachments = normalizedQuery
+                    ? item.attachments.filter(attachment => this._shelfItemMatchesQuery(attachment, normalizedQuery))
+                    : item.attachments;
+
+                if (normalizedQuery || !item.collapsed) {
+                    for (const attachment of attachments) {
+                        const attachmentRecord = this._shelf.createAttachmentRecord(item, attachment);
+                        if (!attachmentRecord) continue;
+                        this._decorateShelfTreeRecord(attachmentRecord, { depth: 1 });
+                        this._populatePoolButton(poolIndex, attachmentRecord);
+                        poolIndex++;
+                    }
+                }
+            }
+
+            if (item.type === 'workspace' && Array.isArray(item.contexts)) {
+                const contexts = normalizedQuery
+                    ? item.contexts.filter(context => this._shelfItemMatchesQuery(context, normalizedQuery))
+                    : item.contexts;
+
+                if (normalizedQuery || !item.collapsed) {
+                    for (const context of contexts) {
+                        const contextRecord = this._shelf.createWorkspaceAppRecord(item, context);
+                        if (!contextRecord) continue;
+                        this._decorateShelfTreeRecord(contextRecord, {
+                            depth: 1,
+                            collapsible: this._shelfItemHasChildren(context),
+                            collapsed: !!context.collapsed,
+                            dndTarget: `workspace-app:${item.id}:${context.id}`
+                        });
+                        this._populatePoolButton(poolIndex, contextRecord);
+                        poolIndex++;
+
+                        const attachments = Array.isArray(context.attachments)
+                            ? (normalizedQuery
+                                ? context.attachments.filter(attachment => this._shelfItemMatchesQuery(attachment, normalizedQuery))
+                                : context.attachments)
+                            : [];
+                        if (normalizedQuery || !context.collapsed) {
+                            for (const attachment of attachments) {
+                                const attachmentRecord = this._shelf.createWorkspaceContextAttachmentRecord(item, context, attachment);
+                                if (!attachmentRecord) continue;
+                                this._decorateShelfTreeRecord(attachmentRecord, { depth: 2 });
+                                this._populatePoolButton(poolIndex, attachmentRecord);
+                                poolIndex++;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (!query && this._sectionSeparator) {
+            this._setSectionSeparatorLabel('Shelf actions');
+            this._sectionSeparator.visible = true;
+            this._setSeparatorIndex(poolIndex);
+
+            this._populatePoolButton(poolIndex, {
+                kind: 'shelf-capture-workspace',
+                id: 'shelf-capture-workspace',
+                name: 'Capture Current Workspace',
+                description: 'Save the current layout with app contexts',
+                iconName: 'view-grid-symbolic'
+            });
+            poolIndex++;
+
+            this._populatePoolButton(poolIndex, {
+                kind: 'shelf-add-clipboard',
+                id: 'shelf-add-clipboard',
+                name: 'Keep Clipboard Text',
+                description: 'Store the current clipboard text as a snippet',
+                iconName: 'edit-paste-symbolic'
+            });
+            poolIndex++;
+
+            if (items.length > 0) {
+                this._populatePoolButton(poolIndex, {
+                    kind: 'shelf-clear',
+                    id: 'shelf-clear',
+                    name: 'Clear Shelf',
+                    description: `${items.length} temporary item${items.length === 1 ? '' : 's'} will be removed`,
+                    iconName: 'edit-clear-all-symbolic'
+                });
+                poolIndex++;
+            }
+        }
+
+        if (poolIndex === 0) {
+            this._showInfoLabel('Shelf is empty');
+        }
+
+        this._updateSelection();
+        this._updateResultsHeight();
+    }
+
+    _decorateShelfTreeRecord(record, options = {}) {
+        if (!record) return record;
+
+        record.depth = Math.max(0, Math.floor(Number(options.depth ?? 0)));
+        record.collapsible = !!options.collapsible;
+        record.collapsed = !!options.collapsed;
+        record.dndTarget = String(options.dndTarget || '');
+        return record;
+    }
+
+    _shelfItemHasChildren(item) {
+        if (!item || typeof item !== 'object') return false;
+        if (Array.isArray(item.attachments) && item.attachments.length > 0) return true;
+        if (Array.isArray(item.contexts) && item.contexts.length > 0) return true;
+        return false;
+    }
+
+    _shelfItemMatchesQuery(item, normalizedQuery) {
+        if (!normalizedQuery) return true;
+
+        const attachmentText = Array.isArray(item.attachments)
+            ? item.attachments.map(attachment => [
+                attachment.label,
+                attachment.value,
+                attachment.path,
+                attachment.uri
+            ].join(' ')).join(' ')
+            : '';
+        const contextText = Array.isArray(item.contexts)
+            ? item.contexts.map(context => [
+                context.label,
+                context.value,
+                context.appId,
+                ...(Array.isArray(context.attachments)
+                    ? context.attachments.map(attachment => [
+                        attachment.label,
+                        attachment.value,
+                        attachment.path,
+                        attachment.uri
+                    ].join(' '))
+                    : [])
+            ].join(' ')).join(' ')
+            : '';
+
+        return normalize([
+            item.label,
+            item.value,
+            item.path,
+            item.uri,
+            item.appId,
+            item.profileName,
+            attachmentText,
+            contextText
+        ].join(' ')).includes(normalizedQuery);
+    }
+
+    _createShelfAddRecord(query) {
+        const value = String(query ?? '').trim();
+        let itemType = 'Text';
+        let iconName = 'list-add-symbolic';
+
+        if (/^https?:\/\//i.test(value)) {
+            itemType = 'Link';
+            iconName = 'web-browser-symbolic';
+        } else if (value.startsWith('file://') || GLib.path_is_absolute(value)) {
+            itemType = 'File';
+            iconName = 'document-open-symbolic';
+        }
+
+        return {
+            kind: 'shelf-add-text',
+            id: `shelf-add:${value}`,
+            name: `Keep ${itemType}`,
+            description: value,
+            iconName,
+            value
+        };
+    }
+
     _isCurrentFileSearch(query, generation) {
         if (!this._isOpen || generation !== this._fileSearchGeneration) return false;
 
         const currentQuery = String(this._getSearchText() ?? '').trim();
         return currentQuery.startsWith(FILE_SEARCH_PREFIX) &&
             currentQuery.slice(FILE_SEARCH_PREFIX.length).trim() === query;
+    }
+
+    _isShelfAvailable() {
+        const showInMenu = this._settings?.get_boolean('tweaks-essential-shelf-show-in-menu') ?? true;
+        return showInMenu && !!this._shelf;
     }
 
     _cancelFileSearch() {
@@ -1957,6 +2795,109 @@ export default class EssentialMenu {
         return scored.map(item => item.record);
     }
 
+    _createInlineActionButton(iconName, accessibleName, callback, options = {}) {
+        const colorStyle = options.destructive
+            ? 'background-color: rgba(192, 28, 40, 0.16); border: 1px solid rgba(192, 28, 40, 0.38); color: #ffb4b8;'
+            : this._isDark
+                ? 'background-color: rgba(255, 255, 255, 0.08); border: 1px solid rgba(255, 255, 255, 0.12); color: rgba(255, 255, 255, 0.86);'
+                : 'background-color: rgba(0, 0, 0, 0.05); border: 1px solid rgba(0, 0, 0, 0.08); color: rgba(0, 0, 0, 0.78);';
+
+        const button = new St.Button({
+            reactive: true,
+            can_focus: true,
+            track_hover: true,
+            visible: false,
+            accessible_name: accessibleName,
+            style: `padding: 5px; border-radius: 8px; margin-left: 2px; min-width: 24px; min-height: 24px; ${colorStyle}`
+        });
+        button.set_child(new St.Icon({
+            icon_name: iconName,
+            icon_size: 14
+        }));
+
+        let pointerPressed = false;
+        let pointerHandled = false;
+        const runAction = () => {
+            try {
+                callback();
+            } catch (e) {
+                logError(`${accessibleName} failed: ${e.message}`);
+            }
+        };
+
+        button.connect('button-press-event', () => {
+            pointerPressed = true;
+            pointerHandled = false;
+            return Clutter.EVENT_STOP;
+        });
+        button.connect('button-release-event', () => {
+            if (pointerPressed) {
+                pointerHandled = true;
+                pointerPressed = false;
+                runAction();
+                GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+                    pointerHandled = false;
+                    return GLib.SOURCE_REMOVE;
+                });
+            }
+            return Clutter.EVENT_STOP;
+        });
+        button.connect('touch-event', (_actor, event) => {
+            if (event.type() === Clutter.EventType.TOUCH_BEGIN) {
+                pointerPressed = true;
+                pointerHandled = false;
+                return Clutter.EVENT_STOP;
+            }
+            if (event.type() === Clutter.EventType.TOUCH_END) {
+                if (pointerPressed) {
+                    pointerHandled = true;
+                    pointerPressed = false;
+                    runAction();
+                    GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+                        pointerHandled = false;
+                        return GLib.SOURCE_REMOVE;
+                    });
+                }
+                return Clutter.EVENT_STOP;
+            }
+            return Clutter.EVENT_PROPAGATE;
+        });
+        button.connect('clicked', () => {
+            if (pointerHandled) return;
+            runAction();
+        });
+        return button;
+    }
+
+    _installSourceBadgeStyle(sourceType = '') {
+        const palette = {
+            flatpak: this._isDark
+                ? ['rgba(28, 113, 216, 0.28)', 'rgba(98, 160, 234, 0.52)', '#d7e8ff']
+                : ['rgba(28, 113, 216, 0.13)', 'rgba(28, 113, 216, 0.28)', '#1a5fb4'],
+            snap: this._isDark
+                ? ['rgba(145, 65, 172, 0.28)', 'rgba(192, 97, 203, 0.52)', '#f4d7ff']
+                : ['rgba(145, 65, 172, 0.13)', 'rgba(145, 65, 172, 0.28)', '#813d9c'],
+            webapp: this._isDark
+                ? ['rgba(38, 162, 105, 0.24)', 'rgba(87, 227, 137, 0.46)', '#d9ffe8']
+                : ['rgba(38, 162, 105, 0.12)', 'rgba(38, 162, 105, 0.28)', '#1b8553'],
+            local: this._isDark
+                ? ['rgba(229, 165, 10, 0.22)', 'rgba(245, 194, 17, 0.46)', '#fff0c2']
+                : ['rgba(229, 165, 10, 0.13)', 'rgba(229, 165, 10, 0.30)', '#8f5d00'],
+            native: this._isDark
+                ? ['rgba(255, 255, 255, 0.10)', 'rgba(255, 255, 255, 0.18)', 'rgba(255, 255, 255, 0.86)']
+                : ['rgba(0, 0, 0, 0.05)', 'rgba(0, 0, 0, 0.12)', 'rgba(0, 0, 0, 0.74)']
+        };
+        const [bg, border, text] = palette[sourceType] || palette.native;
+
+        return [
+            'padding: 1px 7px',
+            'border-radius: 999px',
+            `background-color: ${bg}`,
+            `border: 1px solid ${border}`,
+            `color: ${text}`
+        ].join('; ');
+    }
+
     _createPoolButton(index) {
         const button = new St.Button({
             reactive: true,
@@ -1966,8 +2907,83 @@ export default class EssentialMenu {
             visible: false,
             style_class: 'essential-menu-result'
         });
+        button._delegate = button;
+        button._shelfDragSource = true;
+        button._shelfMenu = this;
+        button.getDragActor = () => this._createInternalShelfDragActor(button._currentRecord);
+        button.getDragActorSource = () => button;
+        button._draggable = DND.makeDraggable(button);
+        const maybeStartDrag = button._draggable._maybeStartDrag;
+        button._draggable._maybeStartDrag = event => {
+            if (false && this._isInternalShelfDragSourceRecord(button._currentRecord)) {
+                return maybeStartDrag.call(button._draggable, event);
+            }
+            return false;
+        };
+        button._draggable.connect('drag-begin', () => {
+            if (!this._isInternalShelfDragSourceRecord(button._currentRecord)) return;
+            this._extendInternalShelfDragGrace(1400);
+            this._suppressNextResultActivationBriefly(1600);
+            log(`Internal Shelf drag started: ${button._currentRecord?.name || button._currentRecord?.id || 'item'}`);
+            this._startInternalShelfDragMonitor(button);
+        });
+        button._draggable.connect('drag-cancelled', () => {
+            log('Internal Shelf drag cancelled');
+            this._stopInternalShelfDragMonitor();
+        });
+        button._draggable.connect('drag-end', () => {
+            log('Internal Shelf drag ended');
+            this._stopInternalShelfDragMonitor();
+        });
+        button.connect('button-press-event', (_actor, event) => {
+            const record = this._visibleRecords[index];
+            if (this._isInternalShelfDragSourceRecord(record) &&
+                (event?.get_button?.() ?? 1) === 1) {
+                this._beginManualShelfDrag(button, record, event);
+                return Clutter.EVENT_STOP;
+            }
+
+            if (!record || !this._requiresDoubleClickActivation(record)) {
+                return Clutter.EVENT_PROPAGATE;
+            }
+
+            if (this._selectedIndex !== index) {
+                this._selectedIndex = index;
+                this._updateSelection();
+            }
+
+            const clickCount = event?.get_click_count?.() ?? 1;
+            const nowMs = Math.floor(GLib.get_monotonic_time() / 1000);
+            const sameContext = this._lastContextClickId === record.id;
+            const isFastSecondClick = sameContext &&
+                nowMs - this._lastContextClickTimeMs <= CONTEXT_DOUBLE_CLICK_MS;
+
+            this._lastContextClickId = record.id;
+            this._lastContextClickTimeMs = nowMs;
+
+            if (clickCount >= 2 || isFastSecondClick) {
+                this._lastContextClickId = '';
+                this._lastContextClickTimeMs = 0;
+                this._launchRecord(record);
+            }
+
+            return Clutter.EVENT_STOP;
+        });
         button.connect('clicked', () => {
             const record = this._visibleRecords[index];
+            if (this._suppressNextResultClick) {
+                this._suppressNextResultClick = false;
+                if (this._suppressNextResultClickTimeoutId > 0) {
+                    try {
+                        GLib.source_remove(this._suppressNextResultClickTimeoutId);
+                    } catch (e) {
+                        // It may already have fired.
+                    }
+                    this._suppressNextResultClickTimeoutId = 0;
+                }
+                return;
+            }
+            if (this._requiresDoubleClickActivation(record)) return;
             if (record) this._launchRecord(record);
         });
         button.connect('motion-event', (_actor, _event) => {
@@ -1985,6 +3001,12 @@ export default class EssentialMenu {
             style: 'spacing: 10px'
         });
 
+        const collapseBtn = this._createInlineActionButton('pan-end-symbolic', 'Expand or Collapse', () => {
+            const record = this._visibleRecords[index];
+            this._toggleShelfCollapse(record);
+        });
+        row.add_child(collapseBtn);
+
         const iconSlot = new St.Bin({
             width: RESULT_ICON_SLOT_SIZE,
             height: RESULT_ICON_SLOT_SIZE,
@@ -1999,29 +3021,107 @@ export default class EssentialMenu {
             x_expand: true,
             x_align: Clutter.ActorAlign.START,
             y_align: Clutter.ActorAlign.CENTER,
-            style: `min-width: ${RESULT_TEXT_COLUMN_MIN_WIDTH}px`
+            style: 'min-width: 0px'
+        });
+        const titleRow = new St.BoxLayout({
+            vertical: false,
+            x_expand: true,
+            x_align: Clutter.ActorAlign.FILL,
+            style: 'spacing: 8px; min-width: 0px'
         });
         const nameLabel = new St.Label({
+            x_expand: true,
             x_align: Clutter.ActorAlign.START,
             style: 'font-size: 13px; font-weight: 700; color: inherit'
         });
+        const sourceBadge = new St.Bin({
+            visible: false,
+            x_expand: false,
+            x_align: Clutter.ActorAlign.END,
+            y_align: Clutter.ActorAlign.CENTER
+        });
+        const sourceBadgeLabel = new St.Label({
+            y_align: Clutter.ActorAlign.CENTER
+        });
+        sourceBadge.set_child(sourceBadgeLabel);
         const detailLabel = new St.Label({
             x_align: Clutter.ActorAlign.START,
             style: `font-size: 11px; color: ${this._isDark ? 'rgba(255, 255, 255, 0.62)' : 'rgba(0, 0, 0, 0.54)'}`
         });
         try {
             nameLabel.clutter_text.set_x_align(Clutter.ActorAlign.START);
+            sourceBadgeLabel.clutter_text.set_x_align(Clutter.ActorAlign.CENTER);
             detailLabel.clutter_text.set_x_align(Clutter.ActorAlign.START);
             nameLabel.clutter_text.set_ellipsize(Pango.EllipsizeMode.END);
+            sourceBadgeLabel.clutter_text.set_ellipsize(Pango.EllipsizeMode.NONE);
             detailLabel.clutter_text.set_ellipsize(Pango.EllipsizeMode.END);
             nameLabel.clutter_text.set_line_wrap(false);
+            sourceBadgeLabel.clutter_text.set_line_wrap(false);
             detailLabel.clutter_text.set_line_wrap(false);
         } catch (e) {
             // Label behavior is best-effort across Shell versions.
         }
-        textBox.add_child(nameLabel);
+        titleRow.add_child(nameLabel);
+        textBox.add_child(titleRow);
         textBox.add_child(detailLabel);
         row.add_child(textBox);
+        const actionBox = new St.BoxLayout({
+            vertical: false,
+            x_expand: false,
+            x_align: Clutter.ActorAlign.END,
+            y_align: Clutter.ActorAlign.CENTER,
+            style: 'spacing: 10px'
+        });
+        actionBox.add_child(sourceBadge);
+        row.add_child(actionBox);
+
+        const shelfAddBtn = this._createInlineActionButton('list-add-symbolic', 'Add to Shelf', () => {
+            const record = this._visibleRecords[index];
+            this._addRecordToShelf(record);
+        });
+        actionBox.add_child(shelfAddBtn);
+
+        const shelfCopyBtn = this._createInlineActionButton('edit-copy-symbolic', 'Copy Shelf Item', () => {
+            const record = this._visibleRecords[index];
+            this._copyShelfRecord(record);
+        });
+        actionBox.add_child(shelfCopyBtn);
+
+        const shelfRevealBtn = this._createInlineActionButton('folder-open-symbolic', 'Reveal Shelf Item', () => {
+            const record = this._visibleRecords[index];
+            this._revealShelfRecord(record);
+        });
+        actionBox.add_child(shelfRevealBtn);
+
+        const shelfAttachBtn = this._createInlineActionButton('mail-attachment-symbolic', 'Attach To App Context', () => {
+            const record = this._visibleRecords[index];
+            this._attachShelfRecord(record);
+        });
+        actionBox.add_child(shelfAttachBtn);
+
+        const shelfRenameBtn = this._createInlineActionButton('document-edit-symbolic', 'Rename Workspace Context', () => {
+            const record = this._visibleRecords[index];
+            this._renameShelfWorkspaceRecord(record);
+        });
+        actionBox.add_child(shelfRenameBtn);
+
+        const shelfOverrideBtn = this._createInlineActionButton('document-save-symbolic', 'Override Workspace Context', () => {
+            const record = this._visibleRecords[index];
+            this._overrideShelfWorkspaceRecord(record);
+        });
+        actionBox.add_child(shelfOverrideBtn);
+
+        const openNewWindowBtn = this._createInlineActionButton('window-new-symbolic', 'Open New Window', () => {
+            const record = this._visibleRecords[index];
+            this._openNewWindowForRecord(record);
+        });
+        actionBox.add_child(openNewWindowBtn);
+
+        const shelfRemoveBtn = this._createInlineActionButton('user-trash-symbolic', 'Remove From Shelf', () => {
+            const record = this._visibleRecords[index];
+            this._removeShelfRecord(record);
+        }, { destructive: true });
+        actionBox.add_child(shelfRemoveBtn);
 
         // Premium Red Oval Uninstall Button (using official Adwaita destructive colors)
         const uninstallBtn = new St.Button({
@@ -2054,13 +3154,28 @@ export default class EssentialMenu {
             }
         });
 
-        row.add_child(uninstallBtn);
+        actionBox.add_child(uninstallBtn);
 
         button.set_child(row);
         
+        button._collapseBtn = collapseBtn;
         button._iconSlot = iconSlot;
+        button._resultRow = row;
+        button._actionBox = actionBox;
+        button._textBox = textBox;
+        button._titleRow = titleRow;
         button._nameLabel = nameLabel;
+        button._sourceBadge = sourceBadge;
+        button._sourceBadgeLabel = sourceBadgeLabel;
         button._detailLabel = detailLabel;
+        button._shelfAddBtn = shelfAddBtn;
+        button._shelfCopyBtn = shelfCopyBtn;
+        button._shelfRevealBtn = shelfRevealBtn;
+        button._shelfAttachBtn = shelfAttachBtn;
+        button._shelfRenameBtn = shelfRenameBtn;
+        button._shelfOverrideBtn = shelfOverrideBtn;
+        button._openNewWindowBtn = openNewWindowBtn;
+        button._shelfRemoveBtn = shelfRemoveBtn;
         button._uninstallBtn = uninstallBtn;
 
         this._resultsBox.add_child(button);
@@ -2087,8 +3202,88 @@ export default class EssentialMenu {
 
         button._nameLabel.text = record.name;
         button._detailLabel.text = record.description || record.id;
-        button._iconSlot.set_child(this._createAppIcon(record, RESULT_ICON_SIZE));
+        const isShelfAttachment = record?.kind === 'shelf-attachment';
+        const isWorkspaceAttachment = record?.kind === 'shelf-workspace-attachment';
+        const isWorkspaceAppContext = record?.kind === 'shelf-workspace-app';
+        const isNestedShelfRecord = isShelfAttachment || isWorkspaceAttachment || isWorkspaceAppContext;
+        const iconSlotSize = (isShelfAttachment || isWorkspaceAttachment) ? RESULT_ATTACHMENT_ICON_SLOT_SIZE : RESULT_ICON_SLOT_SIZE;
+        const iconSize = (isShelfAttachment || isWorkspaceAttachment) ? RESULT_ATTACHMENT_ICON_SIZE : RESULT_ICON_SIZE;
+
+        button._iconSlot.width = iconSlotSize;
+        button._iconSlot.height = iconSlotSize;
+        button._iconSlot.style = `min-width: ${iconSlotSize}px; min-height: ${iconSlotSize}px`;
+        button._iconSlot.set_child(this._createAppIcon(record, iconSize));
+
+        if (button._resultRow) {
+            const depth = Math.max(0, Math.floor(Number(record.depth || 0)));
+            const spacing = isNestedShelfRecord ? 8 : 10;
+            button._resultRow.style = `spacing: ${spacing}px; margin-left: ${depth * RESULT_ATTACHMENT_INDENT}px`;
+        }
+
+        if (button._textBox) {
+            button._textBox.style = 'min-width: 0px';
+        }
+        if (button._titleRow) {
+            button._titleRow.style = 'spacing: 8px; min-width: 0px';
+        }
+        if (button._sourceBadge && button._sourceBadgeLabel) {
+            const source = record?.installSource || null;
+            const sourceLabel = source?.sourceLabel || '';
+            button._sourceBadge.visible = !!sourceLabel;
+            if (sourceLabel) {
+                button._sourceBadge.style = this._installSourceBadgeStyle(source.sourceType);
+                button._sourceBadgeLabel.text = sourceLabel;
+                button._sourceBadgeLabel.style = 'font-size: 9.5px; font-weight: 800; color: inherit; text-align: center';
+            } else {
+                button._sourceBadgeLabel.text = '';
+            }
+        }
         
+        const isShelfItem = record?.kind === 'shelf-item';
+        const isShelfLike = isShelfItem || isShelfAttachment || isWorkspaceAttachment;
+        const shelfItemType = record?.shelfItem?.type || '';
+        const isWorkspaceShelfItem = isShelfItem && shelfItemType === 'workspace';
+        const isAppShelfItem = isShelfItem && shelfItemType === 'app';
+        const canCopyShelfItem = isShelfLike && shelfItemType !== 'workspace';
+        const canAddToShelf = this._isShelfAvailable() &&
+            (record?.app || record?.kind === 'file' || (record?.kind === 'web-search' && record.uri));
+        const canRevealShelfItem = isShelfLike &&
+            (shelfItemType === 'file' || shelfItemType === 'folder');
+        const canAttachShelfItem = isAppShelfItem || isWorkspaceShelfItem || isWorkspaceAppContext ||
+            (isShelfItem && this._hasAppShelfContext(record.shelfItem?.id));
+        const canOpenNewWindow = !!record?.app || isAppShelfItem || isWorkspaceAppContext;
+        if (button._collapseBtn) {
+            button._collapseBtn.visible = !!record.collapsible;
+            button._collapseBtn.set_child(new St.Icon({
+                icon_name: record.collapsed ? 'pan-end-symbolic' : 'pan-down-symbolic',
+                icon_size: 14
+            }));
+        }
+        if (button._shelfAddBtn) {
+            button._shelfAddBtn.visible = canAddToShelf;
+        }
+        if (button._shelfCopyBtn) {
+            button._shelfCopyBtn.visible = canCopyShelfItem;
+        }
+        if (button._shelfRevealBtn) {
+            button._shelfRevealBtn.visible = canRevealShelfItem;
+        }
+        if (button._shelfAttachBtn) {
+            button._shelfAttachBtn.visible = canAttachShelfItem;
+        }
+        if (button._shelfRenameBtn) {
+            button._shelfRenameBtn.visible = isWorkspaceShelfItem;
+        }
+        if (button._shelfOverrideBtn) {
+            button._shelfOverrideBtn.visible = isWorkspaceShelfItem;
+        }
+        if (button._openNewWindowBtn) {
+            button._openNewWindowBtn.visible = canOpenNewWindow;
+        }
+        if (button._shelfRemoveBtn) {
+            button._shelfRemoveBtn.visible = isShelfLike;
+        }
+
         // Dynamically toggle visibility of the uninstallation button
         const uninstallEnabled = this._settings?.get_boolean('tweaks-essential-uninstall-enabled') ?? false;
         const uninstallInMenu = this._settings?.get_boolean('tweaks-essential-uninstall-in-menu') ?? true;
@@ -2101,6 +3296,14 @@ export default class EssentialMenu {
 
         const isSame = (button._currentRecordId === record.id);
         button._currentRecordId = record.id;
+        button._currentRecord = record;
+        button._shelfDndTarget = record.dndTarget || '';
+        const activeDropTarget = this._internalShelfDragTarget || this._externalDndTargetRow;
+        if (!button._shelfDndTarget || button._shelfDndTarget !== activeDropTarget) {
+            button.remove_style_pseudo_class?.('drop');
+        } else {
+            button.add_style_pseudo_class?.('drop');
+        }
 
         const animEnabled = this._settings?.get_boolean('tweaks-essential-menu-animations-enabled') ?? true;
 
@@ -2134,6 +3337,16 @@ export default class EssentialMenu {
         } catch (e) {}
     }
 
+    _setSectionSeparatorLabel(labelText) {
+        try {
+            if (this._sectionSeparator?._label) {
+                this._sectionSeparator._label.text = labelText;
+            }
+        } catch (e) {
+            // Cosmetic only.
+        }
+    }
+
     _showInfoLabel(text) {
         if (this._infoLabel) {
             this._infoLabel.text = text;
@@ -2154,16 +3367,18 @@ export default class EssentialMenu {
             y_align: Clutter.ActorAlign.CENTER,
             style: lineStyle
         }));
-        row.add_child(new St.Label({
+        const label = new St.Label({
             text: labelText,
             y_align: Clutter.ActorAlign.CENTER,
             style: `font-size: 10px; font-weight: 700; color: ${this._isDark ? 'rgba(255, 255, 255, 0.58)' : 'rgba(0, 0, 0, 0.48)'}; text-transform: uppercase`
-        }));
+        });
+        row.add_child(label);
         row.add_child(new St.Widget({
             x_expand: true,
             y_align: Clutter.ActorAlign.CENTER,
             style: lineStyle
         }));
+        row._label = label;
         return row;
     }
 
@@ -2211,6 +3426,14 @@ export default class EssentialMenu {
     }
 
     _createAppIcon(record, size) {
+        if (record?.previewGIcon) {
+            try {
+                return this._createPreviewIcon(record.previewGIcon, size);
+            } catch (e) {
+                // Fall through to normal icon handling.
+            }
+        }
+
         if (record?.gicon) {
             try {
                 return new St.Icon({
@@ -2265,6 +3488,24 @@ export default class EssentialMenu {
             icon_name: 'application-x-executable-symbolic',
             icon_size: size
         });
+    }
+
+    _createPreviewIcon(gicon, size) {
+        const previewSize = Math.max(size + 8, RESULT_ICON_SLOT_SIZE);
+        const bin = new St.Bin({
+            width: previewSize,
+            height: previewSize,
+            x_align: Clutter.ActorAlign.CENTER,
+            y_align: Clutter.ActorAlign.CENTER,
+            style: this._isDark
+                ? 'border-radius: 7px; background-color: rgba(255, 255, 255, 0.08); border: 1px solid rgba(255, 255, 255, 0.16);'
+                : 'border-radius: 7px; background-color: rgba(0, 0, 0, 0.04); border: 1px solid rgba(0, 0, 0, 0.10);'
+        });
+        bin.set_child(new St.Icon({
+            gicon,
+            icon_size: Math.max(size, previewSize - 6)
+        }));
+        return bin;
     }
 
     _handleSearchKeyPress(event) {
@@ -2516,16 +3757,730 @@ export default class EssentialMenu {
     }
 
     _launchRecord(record) {
-        this.close();
+        if (this._isInternalShelfDragActive() || this._suppressNextResultClick) return;
+
+        const keepOpen = this._shouldKeepMenuOpenForRecord(record);
+        if (!keepOpen) this.close();
 
         GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
             try {
                 this._activateRecord(record);
+                if (keepOpen && this._isOpen) {
+                    this._renderResults(this._getSearchText());
+                }
             } catch (e) {
                 logError(`Failed to activate ${record.name}: ${e.message}`);
             }
             return GLib.SOURCE_REMOVE;
         });
+    }
+
+    _shouldKeepMenuOpenForRecord(record) {
+        return [
+            'shelf-add-text',
+            'shelf-add-clipboard',
+            'shelf-capture-workspace',
+            'shelf-clear'
+        ].includes(record?.kind);
+    }
+
+    _requiresDoubleClickActivation(record) {
+        return false;
+    }
+
+    _isInternalShelfDragSourceRecord(record) {
+        if (!record?.shelfItem) return false;
+        if (record.kind === 'shelf-attachment' || record.kind === 'shelf-workspace-attachment') return true;
+        return record.kind === 'shelf-item' &&
+            ['file', 'folder', 'url', 'text'].includes(record.shelfItem.type);
+    }
+
+    _isInternalShelfDragActive() {
+        const nowMs = Math.floor(GLib.get_monotonic_time() / 1000);
+        return !!this._internalShelfDragMonitoring ||
+            !!this._internalShelfDragSourceButton ||
+            !!this._manualShelfDrag ||
+            nowMs < this._internalShelfDragGraceUntilMs;
+    }
+
+    _beginManualShelfDrag(sourceButton, sourceRecord, event) {
+        if (!sourceButton || !sourceRecord) return;
+
+        const [x, y] = event.get_coords();
+        this._cancelManualShelfDrag(false);
+        this._manualShelfDrag = {
+            sourceButton,
+            sourceRecord,
+            startX: x,
+            startY: y,
+            x,
+            y,
+            active: false,
+            actor: null,
+            target: ''
+        };
+        this._extendInternalShelfDragGrace(1400);
+    }
+
+    _handleManualShelfDragCapturedEvent(event) {
+        const drag = this._manualShelfDrag;
+        if (!drag) return false;
+
+        const eventType = event.type();
+        if (eventType === Clutter.EventType.MOTION) {
+            const [x, y] = event.get_coords();
+            drag.x = x;
+            drag.y = y;
+
+            if (!drag.active) {
+                const dx = x - drag.startX;
+                const dy = y - drag.startY;
+                if (Math.sqrt(dx * dx + dy * dy) < INTERNAL_SHELF_DRAG_THRESHOLD) {
+                    return true;
+                }
+                this._activateManualShelfDrag(drag);
+            }
+
+            this._updateManualShelfDrag(drag, x, y);
+            return true;
+        }
+
+        if (eventType === Clutter.EventType.BUTTON_RELEASE ||
+            eventType === Clutter.EventType.TOUCH_END) {
+            const [x, y] = event.get_coords();
+            const wasActive = !!drag.active;
+            const target = wasActive
+                ? (drag.target || this._getInternalShelfDropTargetAt(x, y, drag.sourceButton))
+                : '';
+            const sourceRecord = drag.sourceRecord;
+            this._cancelManualShelfDrag(false);
+
+            if (wasActive) {
+                if (target && this._moveInternalShelfRecordToTarget(sourceRecord, target)) {
+                    if (this._isOpen) this._renderResults(this._getSearchText());
+                }
+                return true;
+            }
+
+            this._internalShelfDragGraceUntilMs = 0;
+            this._suppressNextResultClick = false;
+            this._launchRecord(sourceRecord);
+            return true;
+        }
+
+        if (eventType === Clutter.EventType.KEY_PRESS &&
+            event.get_key_symbol() === Clutter.KEY_Escape) {
+            this._cancelManualShelfDrag(true);
+            return true;
+        }
+
+        return false;
+    }
+
+    _activateManualShelfDrag(drag) {
+        if (!drag || drag.active) return;
+
+        drag.active = true;
+        drag.actor = this._createInternalShelfDragActor(drag.sourceRecord);
+        drag.actor.opacity = 230;
+        Main.uiGroup.add_child(drag.actor);
+        this._raiseActor(drag.actor);
+        drag.sourceButton?.add_style_pseudo_class?.('active');
+        this._suppressNextResultActivationBriefly(1600);
+        this._extendInternalShelfDragGrace(1600);
+        log(`Manual Shelf drag started: ${drag.sourceRecord?.name || drag.sourceRecord?.id || 'item'}`);
+    }
+
+    _updateManualShelfDrag(drag, x, y) {
+        if (!drag?.active) return;
+
+        if (drag.actor) {
+            drag.actor.set_position(Math.round(x + 12), Math.round(y + 12));
+        }
+
+        drag.target = this._getInternalShelfDropTargetAt(x, y, drag.sourceButton);
+        this._internalShelfDragTarget = drag.target;
+        this._syncInternalShelfDragVisuals(drag.target);
+        this._updateShelfDragAutoScroll(y);
+    }
+
+    _cancelManualShelfDrag(extendGrace = true) {
+        const drag = this._manualShelfDrag;
+        if (!drag) return;
+
+        drag.actor?.destroy?.();
+        drag.sourceButton?.remove_style_pseudo_class?.('active');
+        this._manualShelfDrag = null;
+        this._internalShelfDragTarget = '';
+        this._cancelShelfDragAutoExpand();
+        this._collapseAllShelfDragAutoExpanded();
+        this._syncInternalShelfDragVisuals('');
+
+        if (extendGrace) {
+            this._extendInternalShelfDragGrace(900);
+            this._suppressNextResultActivationBriefly(900);
+        }
+    }
+
+    _extendInternalShelfDragGrace(durationMs = 900) {
+        const nowMs = Math.floor(GLib.get_monotonic_time() / 1000);
+        this._internalShelfDragGraceUntilMs = Math.max(
+            this._internalShelfDragGraceUntilMs,
+            nowMs + Math.max(0, durationMs)
+        );
+    }
+
+    _suppressNextResultActivationBriefly(durationMs = 700) {
+        this._suppressNextResultClick = true;
+        if (this._suppressNextResultClickTimeoutId > 0) {
+            try {
+                GLib.source_remove(this._suppressNextResultClickTimeoutId);
+            } catch (e) {
+                // It may already have fired.
+            }
+        }
+
+        this._suppressNextResultClickTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, durationMs, () => {
+            this._suppressNextResultClick = false;
+            this._suppressNextResultClickTimeoutId = 0;
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    _createInternalShelfDragActor(record) {
+        const label = String(record?.name || 'Shelf Item');
+        const row = new St.BoxLayout({
+            vertical: false,
+            style_class: 'essential-menu-result',
+            style: 'spacing: 8px; padding: 9px 12px; border-radius: 10px;'
+        });
+
+        row.add_child(this._createAppIcon(record || {
+            iconName: 'mail-attachment-symbolic'
+        }, RESULT_ATTACHMENT_ICON_SIZE));
+        row.add_child(new St.Label({
+            text: label.length > 42 ? `${label.slice(0, 39)}...` : label,
+            y_align: Clutter.ActorAlign.CENTER,
+            style: 'font-size: 12px; font-weight: 700;'
+        }));
+        return row;
+    }
+
+    _startInternalShelfDragMonitor(sourceButton) {
+        if (!sourceButton || this._internalShelfDragMonitoring) return;
+
+        this._internalShelfDragSourceButton = sourceButton;
+        this._internalShelfDragTarget = '';
+        this._internalShelfDragMonitor = {
+            dragMotion: this._onInternalShelfDragMotion.bind(this),
+            dragDrop: this._onInternalShelfDragDrop.bind(this)
+        };
+
+        try {
+            DND.addDragMonitor(this._internalShelfDragMonitor);
+            this._internalShelfDragMonitoring = true;
+            sourceButton.add_style_pseudo_class?.('active');
+        } catch (e) {
+            logError(`Failed to start internal Shelf drag monitor: ${e.message}`);
+            this._internalShelfDragMonitor = null;
+            this._internalShelfDragSourceButton = null;
+            this._internalShelfDragMonitoring = false;
+        }
+    }
+
+    _stopInternalShelfDragMonitor() {
+        const hadInternalDrag = !!this._internalShelfDragMonitoring ||
+            !!this._internalShelfDragSourceButton ||
+            !!this._internalShelfDragTarget;
+
+        if (this._internalShelfDragMonitoring && this._internalShelfDragMonitor) {
+            try {
+                DND.removeDragMonitor(this._internalShelfDragMonitor);
+            } catch (e) {
+                // The monitor may already be gone during Shell teardown.
+            }
+        }
+
+        this._internalShelfDragMonitoring = false;
+        this._internalShelfDragMonitor = null;
+        this._internalShelfDragTarget = '';
+        this._internalShelfDragSourceButton?.remove_style_pseudo_class?.('active');
+        this._internalShelfDragSourceButton = null;
+        this._cancelShelfDragAutoExpand();
+        this._collapseAllShelfDragAutoExpanded();
+        if (hadInternalDrag) {
+            this._extendInternalShelfDragGrace(1100);
+            this._suppressNextResultActivationBriefly(1100);
+        }
+        this._syncInternalShelfDragVisuals('');
+    }
+
+    _onInternalShelfDragMotion(dragEvent) {
+        const sourceButton = this._getInternalShelfDragSourceButton(dragEvent?.source);
+        if (!sourceButton) return DND.DragMotionResult.CONTINUE;
+
+        const target = this._getInternalShelfDropTargetAt(
+            Number(dragEvent?.x ?? 0),
+            Number(dragEvent?.y ?? 0),
+            sourceButton
+        );
+        this._internalShelfDragTarget = target;
+        this._syncInternalShelfDragVisuals(target);
+        return target ? DND.DragMotionResult.MOVE_DROP : DND.DragMotionResult.CONTINUE;
+    }
+
+    _onInternalShelfDragDrop(dropEvent) {
+        const sourceButton = this._getInternalShelfDragSourceButton(dropEvent?.source) ||
+            this._getInternalShelfDragSourceButton(dropEvent?.dropActor?.source);
+        if (!sourceButton) return DND.DragDropResult.CONTINUE;
+
+        const target = this._internalShelfDragTarget ||
+            this._getInternalShelfDropTargetAt(
+                Number(dropEvent?.x ?? 0),
+                Number(dropEvent?.y ?? 0),
+                sourceButton
+            );
+        const sourceRecord = sourceButton._currentRecord;
+        const moved = target ? this._moveInternalShelfRecordToTarget(sourceRecord, target) : false;
+
+        if (moved) {
+            dropEvent?.dropActor?.destroy?.();
+            log(`Internal Shelf drag completed: ${sourceRecord?.name || sourceRecord?.id || 'item'} -> ${target}`);
+            this._stopInternalShelfDragMonitor();
+            if (this._isOpen) this._renderResults(this._getSearchText());
+        }
+
+        return DND.DragDropResult.CONTINUE;
+    }
+
+    _getInternalShelfDragSourceButton(source) {
+        if (source?._shelfDragSource) return source;
+        if (source?._delegate?._shelfDragSource) return source._delegate;
+        if (this._internalShelfDragSourceButton?._currentRecord) return this._internalShelfDragSourceButton;
+        return null;
+    }
+
+    _getInternalShelfDropTargetAt(x, y, sourceButton) {
+        if (!this._isOpen || !this._pointInsideActor(this._launcher, x, y)) return '';
+
+        const sourceRecord = sourceButton?._currentRecord;
+        const hoverKeys = this._getShelfTreeHoverKeysAt(x, y);
+        this._collapseShelfDragAutoExpandedOutside(hoverKeys);
+        let hoveredExpandableTarget = null;
+        for (const button of this._resultButtons || []) {
+            if (!button?.visible || button === sourceButton || !button._shelfDndTarget) continue;
+            if (!this._pointInsideActor(button, x, y)) continue;
+
+            const target = this._parseShelfDndTarget(button._shelfDndTarget);
+            if (this._targetCanAutoExpand(target)) {
+                hoveredExpandableTarget = target;
+                this._scheduleShelfDragAutoExpand(target);
+            }
+
+            if (this._canAcceptInternalShelfDrop(sourceRecord, target)) {
+                return button._shelfDndTarget;
+            }
+        }
+
+        if (!hoveredExpandableTarget) this._cancelShelfDragAutoExpand();
+        return '';
+    }
+
+    _syncInternalShelfDragVisuals(target) {
+        try {
+            for (const button of this._resultButtons || []) {
+                if (button?._shelfDndTarget && button._shelfDndTarget === target) {
+                    button.add_style_pseudo_class?.('drop');
+                } else if (button?._shelfDndTarget && button._shelfDndTarget !== this._externalDndTargetRow) {
+                    button.remove_style_pseudo_class?.('drop');
+                }
+            }
+        } catch (e) {
+            // Visual hint only.
+        }
+    }
+
+    _canAcceptInternalShelfDrop(sourceRecord, target) {
+        if (!this._isInternalShelfDragSourceRecord(sourceRecord) || !target) return false;
+
+        if (target.type === 'app') {
+            return sourceRecord.kind !== 'shelf-attachment' ||
+                sourceRecord.parentAppItem?.id !== target.appItemId;
+        }
+
+        if (target.type === 'workspace-app') {
+            return sourceRecord.kind !== 'shelf-workspace-attachment' ||
+                sourceRecord.parentWorkspaceItem?.id !== target.workspaceItemId ||
+                sourceRecord.parentWorkspaceContext?.id !== target.contextId;
+        }
+
+        if (target.type === 'workspace') {
+            const workspaceItem = this._shelf?.getItem?.(target.workspaceItemId);
+            return !!this._getWorkspaceDropContext(workspaceItem)?.id;
+        }
+
+        return false;
+    }
+
+    _moveInternalShelfRecordToTarget(sourceRecord, targetValue) {
+        if (!this._shelf || !sourceRecord) return false;
+
+        const target = this._parseShelfDndTarget(targetValue);
+        if (!this._canAcceptInternalShelfDrop(sourceRecord, target)) return false;
+
+        let attached = null;
+        if (target.type === 'app') {
+            attached = this._attachShelfRecordValueToApp(sourceRecord, target.appItemId);
+        } else if (target.type === 'workspace-app') {
+            attached = this._attachShelfRecordValueToWorkspaceContext(
+                sourceRecord,
+                target.workspaceItemId,
+                target.contextId
+            );
+        } else if (target.type === 'workspace') {
+            const workspaceItem = this._shelf.getItem?.(target.workspaceItemId);
+            const context = this._getWorkspaceDropContext(workspaceItem);
+            if (context?.id) {
+                attached = this._attachShelfRecordValueToWorkspaceContext(
+                    sourceRecord,
+                    target.workspaceItemId,
+                    context.id
+                );
+            }
+        }
+
+        if (!attached) return false;
+
+        this._removeInternalShelfDragSource(sourceRecord);
+        this._notifyShelf(`Moved "${sourceRecord.name || 'context'}" into Shelf context.`);
+        return true;
+    }
+
+    _getShelfTreeHoverKeysAt(x, y) {
+        const keys = new Set();
+
+        for (const button of this._resultButtons || []) {
+            if (!button?.visible || !this._pointInsideActor(button, x, y)) continue;
+
+            const record = button._currentRecord;
+            const target = this._parseShelfDndTarget(button._shelfDndTarget || '');
+
+            if (target?.type === 'app') {
+                keys.add(`app:${target.appItemId}`);
+            } else if (target?.type === 'workspace') {
+                keys.add(`workspace:${target.workspaceItemId}`);
+            } else if (target?.type === 'workspace-app') {
+                keys.add(`workspace:${target.workspaceItemId}`);
+                keys.add(`workspace-app:${target.workspaceItemId}:${target.contextId}`);
+            }
+
+            if (record?.kind === 'shelf-attachment' && record.parentAppItem?.id) {
+                keys.add(`app:${record.parentAppItem.id}`);
+            }
+
+            if (record?.kind === 'shelf-workspace-app' && record.parentWorkspaceItem?.id && record.shelfItem?.id) {
+                keys.add(`workspace:${record.parentWorkspaceItem.id}`);
+                keys.add(`workspace-app:${record.parentWorkspaceItem.id}:${record.shelfItem.id}`);
+            }
+
+            if (record?.kind === 'shelf-workspace-attachment' &&
+                record.parentWorkspaceItem?.id &&
+                record.parentWorkspaceContext?.id) {
+                keys.add(`workspace:${record.parentWorkspaceItem.id}`);
+                keys.add(`workspace-app:${record.parentWorkspaceItem.id}:${record.parentWorkspaceContext.id}`);
+            }
+        }
+
+        return keys;
+    }
+
+    _scheduleShelfDragAutoExpand(target) {
+        const expandable = this._getShelfAutoExpandableTarget(target);
+        if (!expandable || !this._shelf) {
+            this._cancelShelfDragAutoExpand();
+            return;
+        }
+
+        if (this._shelfDragAutoExpandTargetId === expandable.key && this._shelfDragAutoExpandTimeoutId > 0) return;
+        this._cancelShelfDragAutoExpand();
+
+        this._shelfDragAutoExpandTargetId = expandable.key;
+        this._shelfDragAutoExpandTimeoutId = GLib.timeout_add(
+            GLib.PRIORITY_DEFAULT,
+            SHELF_DRAG_AUTO_EXPAND_DELAY_MS,
+            () => {
+                this._shelfDragAutoExpandTimeoutId = 0;
+                const current = this._getShelfAutoExpandableTarget(target);
+                if (current) {
+                    current.expand();
+                    this._shelfDragAutoExpanded.set(current.key, current);
+                    if (this._isOpen) this._renderResults(this._getSearchText());
+                }
+                this._shelfDragAutoExpandTargetId = '';
+                return GLib.SOURCE_REMOVE;
+            }
+        );
+    }
+
+    _targetCanAutoExpand(target) {
+        return !!this._getShelfAutoExpandableTarget(target);
+    }
+
+    _getShelfAutoExpandableTarget(target) {
+        if (!target || !this._shelf) return null;
+
+        if (target.type === 'app') {
+            const item = this._shelf.getItem?.(target.appItemId);
+            const attachments = Array.isArray(item?.attachments) ? item.attachments : [];
+            if (item?.type !== 'app' || !item.collapsed || attachments.length === 0) return null;
+            const key = `app:${item.id}`;
+            return {
+                key,
+                collapse: () => this._shelf?.setItemCollapsed?.(item.id, true),
+                expand: () => this._shelf?.setItemCollapsed?.(item.id, false)
+            };
+        }
+
+        if (target.type === 'workspace') {
+            const item = this._shelf.getItem?.(target.workspaceItemId);
+            const contexts = Array.isArray(item?.contexts) ? item.contexts : [];
+            if (item?.type !== 'workspace' || !item.collapsed || contexts.length === 0) return null;
+            const key = `workspace:${item.id}`;
+            return {
+                key,
+                collapse: () => this._shelf?.setItemCollapsed?.(item.id, true),
+                expand: () => this._shelf?.setItemCollapsed?.(item.id, false)
+            };
+        }
+
+        if (target.type === 'workspace-app') {
+            const workspace = this._shelf.getItem?.(target.workspaceItemId);
+            const context = (workspace?.contexts || []).find(item => item.id === target.contextId);
+            const attachments = Array.isArray(context?.attachments) ? context.attachments : [];
+            if (!workspace || !context || !context.collapsed || attachments.length === 0) return null;
+            const key = `workspace-app:${workspace.id}:${context.id}`;
+            return {
+                key,
+                collapse: () => this._shelf?.setWorkspaceContextCollapsed?.(workspace.id, context.id, true),
+                expand: () => this._shelf?.setWorkspaceContextCollapsed?.(workspace.id, context.id, false)
+            };
+        }
+
+        return null;
+    }
+
+    _cancelShelfDragAutoExpand() {
+        if (this._shelfDragAutoExpandTimeoutId > 0) {
+            try {
+                GLib.source_remove(this._shelfDragAutoExpandTimeoutId);
+            } catch (e) {
+                // It may already have fired.
+            }
+        }
+
+        this._shelfDragAutoExpandTimeoutId = 0;
+        this._shelfDragAutoExpandTargetId = '';
+    }
+
+    _cancelShelfDragAutoCollapse(key = '') {
+        if (!this._shelfDragAutoCollapseTimeouts) return;
+
+        if (key) {
+            const timeoutId = this._shelfDragAutoCollapseTimeouts.get(key) || 0;
+            if (timeoutId > 0) {
+                try {
+                    GLib.source_remove(timeoutId);
+                } catch (e) {
+                    // It may already have fired.
+                }
+            }
+            this._shelfDragAutoCollapseTimeouts.delete(key);
+            return;
+        }
+
+        for (const timeoutId of this._shelfDragAutoCollapseTimeouts.values()) {
+            if (timeoutId > 0) {
+                try {
+                    GLib.source_remove(timeoutId);
+                } catch (e) {
+                    // It may already have fired.
+                }
+            }
+        }
+        this._shelfDragAutoCollapseTimeouts.clear();
+    }
+
+    _scheduleShelfDragAutoCollapse(key, target) {
+        if (!key || !target || !this._shelfDragAutoCollapseTimeouts) return;
+        if (this._shelfDragAutoCollapseTimeouts.has(key)) return;
+
+        const timeoutId = GLib.timeout_add(
+            GLib.PRIORITY_DEFAULT,
+            SHELF_DRAG_AUTO_COLLAPSE_DELAY_MS,
+            () => {
+                this._shelfDragAutoCollapseTimeouts.delete(key);
+                if (!this._shelfDragAutoExpanded.has(key)) {
+                    return GLib.SOURCE_REMOVE;
+                }
+
+                try {
+                    target.collapse?.();
+                } catch (e) {
+                    logError(`Failed to auto-collapse Shelf target ${key}: ${e.message}`);
+                }
+                this._shelfDragAutoExpanded.delete(key);
+                if (this._isOpen) this._renderResults(this._getSearchText());
+                return GLib.SOURCE_REMOVE;
+            }
+        );
+
+        this._shelfDragAutoCollapseTimeouts.set(key, timeoutId);
+    }
+
+    _collapseShelfDragAutoExpandedOutside(activeKeys = new Set(), immediate = false) {
+        if (!(activeKeys instanceof Set)) activeKeys = new Set();
+        if (this._shelfDragAutoExpanded.size === 0) {
+            if (immediate) this._cancelShelfDragAutoCollapse();
+            return;
+        }
+
+        let changed = false;
+        for (const [key, target] of [...this._shelfDragAutoExpanded.entries()]) {
+            if (activeKeys.has(key)) {
+                this._cancelShelfDragAutoCollapse(key);
+                continue;
+            }
+
+            if (!immediate) {
+                this._scheduleShelfDragAutoCollapse(key, target);
+                continue;
+            }
+
+            this._cancelShelfDragAutoCollapse(key);
+            try {
+                target.collapse?.();
+                changed = true;
+            } catch (e) {
+                logError(`Failed to auto-collapse Shelf target ${key}: ${e.message}`);
+            }
+            this._shelfDragAutoExpanded.delete(key);
+        }
+
+        if (changed && this._isOpen) this._renderResults(this._getSearchText());
+    }
+
+    _collapseAllShelfDragAutoExpanded() {
+        this._cancelShelfDragAutoCollapse();
+        this._collapseShelfDragAutoExpandedOutside(new Set(), true);
+    }
+
+    _updateShelfDragAutoScroll(stageY) {
+        if (!this._resultsScrollView || !this._resultsBox) return;
+
+        const adjustment = this._getResultsVAdjustment();
+        if (!adjustment) return;
+
+        try {
+            const [, viewY] = this._resultsScrollView.get_transformed_position();
+            let viewHeight = 0;
+            if (typeof this._resultsScrollView.get_transformed_size === 'function') {
+                [, viewHeight] = this._resultsScrollView.get_transformed_size();
+            } else {
+                const box = this._resultsScrollView.get_allocation_box();
+                viewHeight = box.y2 - box.y1;
+            }
+            if (!Number.isFinite(viewY) || !Number.isFinite(viewHeight) || viewHeight <= 0) return;
+
+            const localY = Number(stageY) - viewY;
+            let direction = 0;
+            let strength = 0;
+
+            if (localY < SHELF_DRAG_AUTO_SCROLL_EDGE_PX) {
+                direction = -1;
+                strength = 1 - Math.max(0, localY) / SHELF_DRAG_AUTO_SCROLL_EDGE_PX;
+            } else if (localY > viewHeight - SHELF_DRAG_AUTO_SCROLL_EDGE_PX) {
+                direction = 1;
+                strength = 1 - Math.max(0, viewHeight - localY) / SHELF_DRAG_AUTO_SCROLL_EDGE_PX;
+            }
+
+            if (direction === 0 || strength <= 0) return;
+
+            const currentTarget = this._scrollTimeline && this._scrollTimeline.is_playing()
+                ? this._scrollTargetValue
+                : adjustment.get_value();
+            const delta = direction * SHELF_DRAG_AUTO_SCROLL_STEP * Math.max(0.35, strength);
+            const next = this._clampScrollValue(adjustment, currentTarget + delta);
+            if (Math.abs(next - adjustment.get_value()) < 0.2) return;
+
+            this._scrollTargetValue = next;
+            this._ensureScrollTimeline();
+        } catch (e) {
+            logError(`Shelf drag auto-scroll failed: ${e.message}`);
+        }
+    }
+
+    _attachShelfRecordValueToApp(sourceRecord, appItemId) {
+        const item = sourceRecord?.shelfItem;
+        if (!item || !appItemId) return null;
+
+        if (item.type === 'text') {
+            return this._shelf.attachTextToApp?.(appItemId, item.value || item.label || '', item.label || '');
+        }
+
+        return this._shelf.attachValueToApp?.(
+            appItemId,
+            item.uri || item.value || item.path || '',
+            item.label || '',
+            item.iconName || ''
+        );
+    }
+
+    _attachShelfRecordValueToWorkspaceContext(sourceRecord, workspaceItemId, contextId) {
+        const item = sourceRecord?.shelfItem;
+        if (!item || !workspaceItemId || !contextId) return null;
+
+        if (item.type === 'text') {
+            return this._shelf.attachTextToWorkspaceContext?.(
+                workspaceItemId,
+                contextId,
+                item.value || item.label || '',
+                item.label || ''
+            );
+        }
+
+        return this._shelf.attachValueToWorkspaceContext?.(
+            workspaceItemId,
+            contextId,
+            item.uri || item.value || item.path || '',
+            item.label || '',
+            item.iconName || ''
+        );
+    }
+
+    _removeInternalShelfDragSource(sourceRecord) {
+        const item = sourceRecord?.shelfItem;
+        if (!item?.id) return;
+
+        if (sourceRecord.kind === 'shelf-item') {
+            if (!['app', 'workspace'].includes(item.type)) {
+                this._shelf?.remove?.(item.id);
+            }
+            return;
+        }
+
+        if (sourceRecord.kind === 'shelf-attachment') {
+            const parent = sourceRecord.parentAppItem;
+            if (parent?.id) this._shelf?.removeAttachment?.(parent.id, item.id);
+            return;
+        }
+
+        if (sourceRecord.kind === 'shelf-workspace-attachment') {
+            const workspace = sourceRecord.parentWorkspaceItem;
+            const context = sourceRecord.parentWorkspaceContext;
+            if (workspace?.id && context?.id) {
+                this._shelf?.removeWorkspaceContextAttachment?.(workspace.id, context.id, item.id);
+            }
+        }
     }
 
     _activateRecord(record) {
@@ -2539,6 +4494,27 @@ export default class EssentialMenu {
                 return;
             case 'file':
                 this._openFile(record.uri);
+                return;
+            case 'shelf-add-text':
+                this._addTextToShelf(record.value);
+                return;
+            case 'shelf-add-clipboard':
+                this._addClipboardToShelf();
+                return;
+            case 'shelf-capture-workspace':
+                this._captureWorkspaceContextToShelf();
+                return;
+            case 'shelf-clear':
+                this._clearShelf();
+                return;
+            case 'shelf-item':
+                this._openShelfRecord(record);
+                return;
+            case 'shelf-workspace-app':
+                this._openShelfWorkspaceAppRecord(record);
+                return;
+            case 'shelf-workspace-attachment':
+                this._openShelfRecord(record);
                 return;
             default:
                 this._launchApp(record);
@@ -2564,15 +4540,20 @@ export default class EssentialMenu {
 
     _openWebSearch(query) {
         const engine = this._settings?.get_string('tweaks-essential-menu-default-search-engine') ?? 'duckduckgo';
-        let prefix = 'https://duckduckgo.com/?q=';
-        if (engine === 'google') prefix = 'https://www.google.com/search?q=';
-        else if (engine === 'bing') prefix = 'https://www.bing.com/search?q=';
-
-        const uri = prefix + encodeURIComponent(String(query ?? '').trim());
+        const uri = this._buildWebSearchUri(query);
         const timestamp = global.get_current_time?.() ?? 0;
         const context = global.create_app_launch_context?.(timestamp, -1) ?? null;
         Gio.AppInfo.launch_default_for_uri(uri, context);
         log(`Opened web search using ${engine}: ${query}`);
+    }
+
+    _buildWebSearchUri(query) {
+        const engine = this._settings?.get_string('tweaks-essential-menu-default-search-engine') ?? 'duckduckgo';
+        let prefix = WEB_SEARCH_URI_PREFIX;
+        if (engine === 'google') prefix = 'https://www.google.com/search?q=';
+        else if (engine === 'bing') prefix = 'https://www.bing.com/search?q=';
+
+        return prefix + encodeURIComponent(String(query ?? '').trim());
     }
 
     _openFile(uri) {
@@ -2582,19 +4563,2443 @@ export default class EssentialMenu {
         log(`Opened file search result: ${uri}`);
     }
 
-    _launchApp(record) {
+    _openUri(uri) {
+        const value = String(uri ?? '').trim();
+        if (!value) return;
+
+        const timestamp = global.get_current_time?.() ?? 0;
+        const context = global.create_app_launch_context?.(timestamp, -1) ?? null;
+        Gio.AppInfo.launch_default_for_uri(value, context);
+    }
+
+    _addRecordToShelf(record) {
+        if (!this._isShelfAvailable() || !record) return;
+
+        const item = this._shelf.addFromRecord(this._prepareShelfRecord(record));
+        if (item) {
+            const linkedProfile = item.type === 'app' && item.profileName
+                ? ` with "${item.profileName}" layout`
+                : '';
+            this._notifyShelf(`Added "${item.label}"${linkedProfile} to Shelf.`);
+        }
+    }
+
+    _prepareShelfRecord(record) {
+        if (!record?.app || !record?.id) return record;
+
+        const profileName = this._getShelfProfileForApp(record.id, record.profileName || '');
+        return {
+            ...record,
+            profileName
+        };
+    }
+
+    _getShelfProfileForApp(appId, preferredProfileName = '') {
+        const candidates = [
+            String(preferredProfileName ?? '').trim(),
+            this._getActiveWorkspaceProfileName()
+        ].filter(Boolean);
+
+        for (const profileName of candidates) {
+            if (this._profileContainsApp(profileName, appId)) return profileName;
+        }
+
+        return '';
+    }
+
+    _getActiveWorkspaceProfileName() {
+        try {
+            return String(this._settings?.get_string('profiles-active-profile') || '').trim();
+        } catch (e) {
+            return '';
+        }
+    }
+
+    _hasAppShelfContext(excludeId = '') {
+        return !!this._shelf?.getMostRecentAppItem?.(excludeId || '');
+    }
+
+    _attachShelfRecord(record) {
+        if (!this._isShelfAvailable()) return;
+
+        if (record?.kind === 'shelf-workspace-app') {
+            const context = record.shelfItem;
+            const workspace = record.parentWorkspaceItem;
+            if (!context?.id || !workspace?.id) return;
+
+            this._readClipboardText(text => {
+                const value = String(text ?? '').trim();
+                if (!value) {
+                    this._notifyShelf('Clipboard is empty.');
+                    return;
+                }
+
+                const attachment = this._shelf?.attachTextToWorkspaceContext?.(workspace.id, context.id, value);
+                if (attachment) {
+                    this._notifyShelf(`Attached clipboard text to ${context.label}.`);
+                    if (this._isOpen) this._renderResults(this._getSearchText());
+                }
+            });
+            return;
+        }
+
+        if (record?.kind !== 'shelf-item') return;
+
+        const item = record.shelfItem;
+        if (!item) return;
+
+        if (item.type === 'workspace') {
+            const context = this._getWorkspaceDropContext(item);
+            if (!context?.id) {
+                this._notifyShelf('Expand the workspace and use an app row.');
+                return;
+            }
+
+            this._readClipboardText(text => {
+                const value = String(text ?? '').trim();
+                if (!value) {
+                    this._notifyShelf('Clipboard is empty.');
+                    return;
+                }
+
+                const attachment = this._shelf?.attachTextToWorkspaceContext?.(item.id, context.id, value);
+                if (attachment) {
+                    this._notifyShelf(`Attached clipboard text to ${context.label}.`);
+                    if (this._isOpen) this._renderResults(this._getSearchText());
+                }
+            });
+            return;
+        }
+
+        if (item.type === 'app') {
+            this._readClipboardText(text => {
+                const value = String(text ?? '').trim();
+                if (!value) {
+                    this._notifyShelf('Clipboard is empty.');
+                    return;
+                }
+
+                const attachment = this._shelf?.attachTextToApp?.(item.id, value);
+                if (attachment) {
+                    this._notifyShelf(`Attached clipboard text to ${item.label}.`);
+                    if (this._isOpen) this._renderResults(this._getSearchText());
+                }
+            });
+            return;
+        }
+
+        const appItem = this._shelf?.getMostRecentAppItem?.(item.id);
+        if (!appItem) {
+            this._notifyShelf('Add an app to Shelf first.');
+            return;
+        }
+
+        const attachment = this._shelf?.attachItemToApp?.(appItem.id, item.id);
+        if (attachment) {
+            this._notifyShelf(`Attached "${item.label}" to ${appItem.label}.`);
+            if (this._isOpen) this._renderResults(this._getSearchText());
+        }
+    }
+
+    _toggleShelfCollapse(record) {
+        if (!this._isShelfAvailable() || !record?.collapsible) return;
+
+        const nextCollapsed = !record.collapsed;
+        if (record.kind === 'shelf-item') {
+            const item = record.shelfItem;
+            if (item?.id) {
+                this._shelf?.setItemCollapsed?.(item.id, nextCollapsed);
+            }
+        } else if (record.kind === 'shelf-workspace-app') {
+            const workspace = record.parentWorkspaceItem;
+            const context = record.shelfItem;
+            if (workspace?.id && context?.id) {
+                this._shelf?.setWorkspaceContextCollapsed?.(workspace.id, context.id, nextCollapsed);
+            }
+        }
+
+        if (this._isOpen) this._renderResults(this._getSearchText());
+    }
+
+    _renameShelfWorkspaceRecord(record) {
+        if (!this._isShelfAvailable() || record?.kind !== 'shelf-item') return;
+
+        const item = record.shelfItem;
+        if (!item || item.type !== 'workspace') return;
+
+        const dialog = new ModalDialog.ModalDialog({
+            styleClass: 'profiles-rename-dialog'
+        });
+        const title = new St.Label({
+            text: 'Rename Workspace Context',
+            style_class: 'headline'
+        });
+        const entry = new St.Entry({
+            text: item.label || item.profileName || item.value || '',
+            can_focus: true,
+            x_expand: true
+        });
+
+        const submit = () => {
+            const newName = String(entry.get_text?.() || '').trim();
+            if (!newName) {
+                this._notifyShelf('Workspace name cannot be empty.');
+                return;
+            }
+
+            const oldName = item.profileName || item.value || item.label || '';
+            if (oldName !== newName && !this._renameWorkspaceProfile(oldName, newName)) {
+                return;
+            }
+
+            const updated = this._shelf?.renameWorkspaceContext?.(item.id, newName, newName);
+            if (updated) {
+                this._notifyShelf(`Renamed workspace context to "${newName}".`);
+                dialog.close();
+                if (this._isOpen) this._renderResults(this._getSearchText());
+            }
+        };
+
+        dialog.contentLayout.add_child(title);
+        dialog.contentLayout.add_child(entry);
+        dialog.setButtons([
+            {
+                label: 'Cancel',
+                action: () => dialog.close(),
+                key: Clutter.KEY_Escape
+            },
+            {
+                label: 'Rename',
+                action: submit,
+                default: true
+            }
+        ]);
+        dialog.open();
+        entry.grab_key_focus();
+        entry.clutter_text?.set_selection?.(0, entry.get_text().length);
+        entry.clutter_text?.connect?.('activate', submit);
+    }
+
+    _overrideShelfWorkspaceRecord(record) {
+        if (!this._isShelfAvailable() || record?.kind !== 'shelf-item') return;
+
+        const item = record.shelfItem;
+        if (!item || item.type !== 'workspace') return;
+
+        const profileName = item.profileName || item.value || '';
+        if (!profileName) return;
+
+        const profiles = this._getProfilesService();
+        if (!profiles || typeof profiles.saveCurrentLayout !== 'function') {
+            this._notifyShelf('Workspace Profiles is not available.');
+            return;
+        }
+
+        const result = profiles.saveCurrentLayout(profileName, {
+            source: 'shelf-context',
+            overwrite: true,
+            operation: 'modify'
+        });
+
+        if (!result?.ok) {
+            this._notifyShelf(result?.message || `Could not update "${profileName}".`);
+            return;
+        }
+
+        const profile = this._getWorkspaceProfileEntry(profileName);
+        const contexts = this._buildWorkspaceContextsFromProfile(profile);
+        const updated = this._shelf?.updateWorkspaceContext?.(item.id, profileName, item.label || profileName, contexts, {
+            preserveExistingAttachments: true
+        });
+
+        if (updated) {
+            this._notifyShelf(`Updated workspace context "${updated.label || profileName}".`);
+        } else {
+            this._notifyShelf(`Updated "${profileName}", but could not refresh its Shelf context.`);
+        }
+
+        if (this._isOpen) this._renderResults(this._getSearchText());
+    }
+
+    _renameWorkspaceProfile(oldName, newName) {
+        const profiles = this._getProfilesService();
+        if (!oldName || oldName === newName) return true;
+
+        try {
+            if (profiles && typeof profiles.renameProfile === 'function') {
+                return !!profiles.renameProfile(oldName, newName);
+            }
+        } catch (e) {
+            logError(`Workspace profile rename failed: ${e.message}`);
+        }
+
+        this._notifyShelf('Workspace Profiles is not available.');
+        return false;
+    }
+
+    _deleteWorkspaceProfile(profileName) {
+        const profiles = this._getProfilesService();
+        if (!profileName) return false;
+
+        try {
+            if (profiles && typeof profiles.deleteProfile === 'function') {
+                return !!profiles.deleteProfile(profileName);
+            }
+        } catch (e) {
+            logError(`Workspace profile delete failed: ${e.message}`);
+        }
+
+        return false;
+    }
+
+    _getProfilesService() {
+        return global.gnome_essentials_profiles || null;
+    }
+
+    _importExternalDndSelection(target = '') {
+        if (!this._shelf) {
+            this._notifyShelf('Enable Essential Shelf to accept dropped files.');
+            return;
+        }
+
+        if (this._externalDndCachedValues.length > 0) {
+            const values = [...this._externalDndCachedValues];
+            this._resetExternalDndSelectionCache();
+            this._finishExternalDndImport(values, target);
+            return;
+        }
+
+        if (this._externalDndSelectionPending) {
+            this._externalDndPendingImportTarget = target;
+            return;
+        }
+
+        this._externalDndPendingImportTarget = target;
+        this._primeExternalDndSelection(true);
+    }
+
+    _finishExternalDndImport(values, target = '') {
+        if (!values || values.length === 0) {
+            this._notifyShelf('Dropped item did not expose file, link, or text data.');
+            return;
+        }
+
+        let added = 0;
+        const rowTarget = this._parseShelfDndTarget(target);
+        for (const value of values) {
+            if (rowTarget
+                ? this._addExternalDndValueToTarget(value, rowTarget)
+                : this._addExternalDndValueToShelf(value)) {
+                added += 1;
+            }
+        }
+
+        if (added > 0) {
+            const action = rowTarget ? 'Attached' : 'Added';
+            const destination = rowTarget ? 'context' : 'Shelf';
+            this._notifyShelf(`${action} ${added} dropped item${added === 1 ? '' : 's'} to ${destination}.`);
+            this._showShelfAfterDrop(target);
+        } else {
+            this._notifyShelf('Dropped items were already stored or could not be added.');
+        }
+    }
+
+    _addExternalDndValueToShelf(value) {
+        if (!this._shelf) return null;
+
+        const text = String(value ?? '').trim();
+        if (!text) return null;
+
+        if (/^(file|https?):\/\//i.test(text) || GLib.path_is_absolute(text)) {
+            return this._shelf.addUri(text);
+        }
+
+        return this._shelf.addText(text);
+    }
+
+    _parseShelfDndTarget(target) {
+        const value = String(target || '');
+        if (value.startsWith('app:')) {
+            const appItemId = value.slice('app:'.length);
+            return appItemId ? { type: 'app', appItemId } : null;
+        }
+
+        if (value.startsWith('workspace-app:')) {
+            const parts = value.split(':');
+            const workspaceItemId = parts[1] || '';
+            const contextId = parts[2] || '';
+            return workspaceItemId && contextId
+                ? { type: 'workspace-app', workspaceItemId, contextId }
+                : null;
+        }
+
+        if (value.startsWith('workspace:')) {
+            const workspaceItemId = value.slice('workspace:'.length);
+            return workspaceItemId ? { type: 'workspace', workspaceItemId } : null;
+        }
+
+        return null;
+    }
+
+    _addExternalDndValueToTarget(value, target) {
+        if (!this._shelf || !target) return null;
+
+        const text = String(value ?? '').trim();
+        if (!text) return null;
+
+        if (target.type === 'app') {
+            return this._shelf.attachValueToApp?.(target.appItemId, text);
+        }
+
+        if (target.type === 'workspace-app') {
+            return this._shelf.attachValueToWorkspaceContext?.(target.workspaceItemId, target.contextId, text);
+        }
+
+        if (target.type === 'workspace') {
+            const workspaceItem = this._shelf.getItem?.(target.workspaceItemId);
+            const context = this._getWorkspaceDropContext(workspaceItem);
+            if (!context?.id) return null;
+            return this._shelf.attachValueToWorkspaceContext?.(target.workspaceItemId, context.id, text);
+        }
+
+        return null;
+    }
+
+    _primeExternalDndSelection(notifyOnError = false) {
+        if (this._externalDndSelectionRequested || this._externalDndSelectionPending) return;
+
+        this._externalDndSelectionRequested = true;
+        this._externalDndSelectionPending = true;
+
+        this._readExternalDndText((text, mimetype, mimetypes) => {
+            const values = this._parseExternalDndValues(text, mimetype);
+            this._externalDndSelectionPending = false;
+            this._externalDndCachedValues = values;
+            this._externalDndCachedMimetype = mimetype;
+            log(`External DND payload ${values.length} item(s), mimetype=${mimetype}, offered=${mimetypes.join(', ') || '(none)'}`);
+
+            if (this._externalDndPendingImportTarget) {
+                const target = this._externalDndPendingImportTarget;
+                this._externalDndPendingImportTarget = '';
+                this._resetExternalDndSelectionCache();
+                this._finishExternalDndImport(values, target);
+            }
+        }, (message, mimetypes = []) => {
+            this._externalDndSelectionPending = false;
+            log(`External DND unreadable: ${message}; offered=${mimetypes.join(', ') || '(none)'}`);
+
+            if (notifyOnError || this._externalDndPendingImportTarget) {
+                this._notifyShelf(message);
+            }
+
+            this._externalDndPendingImportTarget = '';
+            this._resetExternalDndSelectionCache();
+        });
+    }
+
+    _resetExternalDndSelectionCache() {
+        this._externalDndSelectionRequested = false;
+        this._externalDndSelectionPending = false;
+        this._externalDndCachedValues = [];
+        this._externalDndCachedMimetype = '';
+        this._externalDndPendingImportTarget = '';
+    }
+
+    _showShelfAfterDrop(target = '') {
+        if (target === 'panel' && !this._isOpen) {
+            try {
+                this.open();
+                GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+                    if (this._isOpen) this._activateSearchMode(SHELF_PREFIX);
+                    return GLib.SOURCE_REMOVE;
+                });
+            } catch (e) {
+                logError(`Could not open Shelf after drop: ${e.message}`);
+            }
+            return;
+        }
+
+        if (this._isOpen || target === 'menu') {
+            this._activateSearchMode(SHELF_PREFIX);
+        }
+    }
+
+    _readExternalDndText(callback, onError = null) {
+        let selection = null;
+        try {
+            selection = global.display.get_selection();
+        } catch (e) {
+            onError?.('External drag data is not available in this Shell session.', []);
+            return;
+        }
+
+        const selectionType = Meta.SelectionType?.SELECTION_DND;
+        if (selectionType === undefined) {
+            onError?.('This GNOME Shell build does not expose DND selection data.', []);
+            return;
+        }
+
+        let mimetypes = [];
+        try {
+            mimetypes = selection.get_mimetypes(selectionType) || [];
+        } catch (e) {
+            logError(`Could not read DND mimetypes: ${e.message}`);
+        }
+
+        const mimetype = this._chooseExternalDndMimetype(mimetypes);
+
+        if (!mimetype) {
+            onError?.('Dropped item did not provide readable URI data.', mimetypes);
+            return;
+        }
+
+        try {
+            const stream = Gio.MemoryOutputStream.new_resizable();
+            selection.transfer_async(selectionType, mimetype, -1, stream, null, (selectionObject, result) => {
+                try {
+                    selectionObject.transfer_finish(result);
+                    const bytes = stream.steal_as_bytes();
+                    const data = bytes.get_data();
+                    const text = new TextDecoder().decode(data);
+                    callback(text, mimetype, mimetypes);
+                } catch (e) {
+                    logError(`Could not transfer DND data: ${e.message}`);
+                    onError?.('Could not read dropped item data.', mimetypes);
+                }
+            });
+        } catch (e) {
+            logError(`Could not start DND transfer: ${e.message}`);
+            onError?.('Could not read dropped item data.', mimetypes);
+        }
+    }
+
+    _chooseExternalDndMimetype(mimetypes) {
+        const offered = Array.isArray(mimetypes) ? mimetypes : [];
+        const lowerToOriginal = new Map(offered.map(type => [String(type).toLowerCase(), type]));
+        const preferred = [
+            'text/uri-list',
+            'x-special/gnome-copied-files',
+            'x-special/gnome-icon-list',
+            'text/x-moz-url',
+            'text/plain;charset=utf-8',
+            'text/plain',
+            'utf8_string',
+            'string',
+        ];
+
+        for (const type of preferred) {
+            if (lowerToOriginal.has(type)) return lowerToOriginal.get(type);
+        }
+
+        return offered.find(type => /uri|url|gnome.*icon|copied-files/i.test(type)) ||
+            offered.find(type => /^text\//i.test(type)) ||
+            '';
+    }
+
+    _parseExternalDndValues(text, mimetype = '') {
+        const payload = String(text ?? '').replace(/\0/g, '\n');
+        const uriMatches = payload.match(/\b(?:file|https?):\/\/[^\s"'<>]+/gi) || [];
+        const lines = payload
+            .split(/\r?\n/)
+            .map(line => line.trim())
+            .filter(Boolean);
+
+        const normalizedMimetype = String(mimetype ?? '').toLowerCase();
+
+        if (normalizedMimetype === 'x-special/gnome-copied-files' &&
+            lines.length > 0 &&
+            ['copy', 'cut'].includes(lines[0].toLowerCase())) {
+            lines.shift();
+        }
+
+        let lineValues = lines;
+        if (normalizedMimetype === 'text/x-moz-url') {
+            lineValues = lines.slice(0, 1);
+        } else if (normalizedMimetype === 'x-special/gnome-icon-list') {
+            lineValues = lines.map(line => {
+                const token = line.split(/\s+/).find(part => /^(file|https?):\/\//i.test(part));
+                return token || line;
+            });
+        }
+
+        const normalizedValues = [...uriMatches, ...lineValues]
+            .filter(line => !line.startsWith('#'))
+            .map(line => this._normalizeDroppedValue(line))
+            .filter(Boolean)
+            .filter((value, index, values) => values.indexOf(value) === index);
+
+        if (normalizedValues.length > 0) return normalizedValues;
+
+        if (this._isPlainTextExternalDndMimetype(normalizedMimetype)) {
+            const droppedText = payload.trim();
+            return droppedText ? [droppedText] : [];
+        }
+
+        return [];
+    }
+
+    _isPlainTextExternalDndMimetype(mimetype) {
+        const normalized = String(mimetype ?? '').toLowerCase();
+        return normalized === 'text/plain' ||
+            normalized.startsWith('text/plain;') ||
+            normalized === 'utf8_string' ||
+            normalized === 'string';
+    }
+
+    _normalizeDroppedValue(value) {
+        const text = String(value ?? '').trim();
+        if (!text) return '';
+
+        if (/^file:\/\//i.test(text) || /^https?:\/\//i.test(text)) return text;
+
+        if (GLib.path_is_absolute(text)) {
+            try {
+                return Gio.File.new_for_path(text).get_uri();
+            } catch (e) {
+                return text;
+            }
+        }
+
+        return '';
+    }
+
+    _addTextToShelf(text) {
+        if (!this._isShelfAvailable()) return;
+
+        const item = this._shelf.addText(text);
+        if (item) {
+            this._notifyShelf(`Added "${item.label}" to Shelf.`);
+        }
+    }
+
+    _addClipboardToShelf() {
+        if (!this._isShelfAvailable()) return;
+
+        this._readClipboardText(text => {
+            const value = String(text ?? '').trim();
+            if (!value) {
+                this._notifyShelf('Clipboard is empty.');
+                return;
+            }
+
+            const item = this._shelf?.addText(value);
+            if (item) {
+                this._notifyShelf(`Added "${item.label}" to Shelf.`);
+            }
+        });
+    }
+
+    _readClipboardText(callback) {
+        try {
+            St.Clipboard.get_default().get_text(St.ClipboardType.CLIPBOARD, (_clipboard, text) => {
+                callback(text || '');
+            });
+            return;
+        } catch (e) {
+            // Fall through to global clipboard fallback where available.
+        }
+
+        try {
+            global.clipboard.get_text(St.ClipboardType.CLIPBOARD, (_clipboard, text) => {
+                callback(text || '');
+            });
+        } catch (e) {
+            callback('');
+        }
+    }
+
+    _clearShelf() {
+        if (!this._isShelfAvailable()) return;
+
+        this._shelf.clear();
+        this._notifyShelf('Shelf cleared.');
+    }
+
+    _captureWorkspaceContextToShelf() {
+        if (!this._isShelfAvailable()) return;
+
+        const profiles = global.gnome_essentials_profiles;
+        if (!profiles || typeof profiles.saveCurrentLayout !== 'function') {
+            this._notifyShelf('Enable Workspace Profiles before capturing a workspace context.');
+            return;
+        }
+
+        const profileName = this._generateWorkspaceContextProfileName();
+        const result = profiles.saveCurrentLayout(profileName, {
+            source: 'shelf-context',
+            overwrite: false
+        });
+
+        if (!result?.ok) {
+            this._notifyShelf(result?.message || 'Could not capture workspace context.');
+            return;
+        }
+
+        const profile = this._getWorkspaceProfileEntry(profileName);
+        const contexts = this._buildWorkspaceContextsFromProfile(profile);
+        const item = this._shelf.addWorkspaceContext(profileName, profileName, contexts);
+        if (!item) {
+            this._notifyShelf('Captured layout, but could not add it to Shelf.');
+            return;
+        }
+
+        const contextCount = Array.isArray(item.contexts) ? item.contexts.length : 0;
+        const attachmentCount = (item.contexts || []).reduce((total, context) => {
+            const attachments = Array.isArray(context.attachments) ? context.attachments.length : 0;
+            return total + attachments;
+        }, 0);
+        const contextText = `${contextCount} app${contextCount === 1 ? '' : 's'}`;
+        const attachmentText = attachmentCount > 0
+            ? ` and ${attachmentCount} context item${attachmentCount === 1 ? '' : 's'}`
+            : '';
+        this._notifyShelf(`Captured "${item.label}" with ${contextText}${attachmentText}.`);
+
+        if (this._isOpen) this._renderResults(this._getSearchText());
+    }
+
+    _generateWorkspaceContextProfileName() {
+        const now = new Date();
+        const stamp = now.toLocaleTimeString([], {
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit'
+        });
+        const baseName = `Profile at ${stamp}`;
+
+        let name = baseName;
+        let suffix = 2;
+        while (this._getWorkspaceProfileEntry(name)) {
+            name = `${baseName} ${suffix}`;
+            suffix++;
+        }
+
+        return name;
+    }
+
+    _buildWorkspaceContextsFromProfile(profile) {
+        const windows = Array.isArray(profile?.windows) ? profile.windows : [];
+        if (windows.length === 0) return [];
+
+        const recentFiles = this._loadRecentFileCandidates();
+        const contexts = new Map();
+
+        for (const config of windows) {
+            const appId = String(config?.app_id || '').trim();
+            if (!appId) continue;
+
+            const key = this._normalizeAppIdForMatch(appId);
+            if (!key) continue;
+
+            if (!contexts.has(key)) {
+                const app = this._appSystem.lookup_app(appId);
+                const label = app?.get_name?.() || config.wm_class || appId;
+                contexts.set(key, {
+                    type: 'app',
+                    label,
+                    value: appId,
+                    appId,
+                    iconName: app ? this._getAppIconName(app, appId) : this._getDesktopIconName(appId),
+                    attachments: [],
+                    _attachmentKeys: new Set()
+                });
+            }
+
+            const context = contexts.get(key);
+            const attachment = this._inferWindowContextAttachment(config, context, recentFiles);
+            const attachmentKey = attachment ? `${attachment.type}:${attachment.uri || attachment.path || attachment.value}`.toLowerCase() : '';
+            if (attachment && attachmentKey && !context._attachmentKeys.has(attachmentKey)) {
+                context.attachments.push(attachment);
+                context._attachmentKeys.add(attachmentKey);
+            }
+        }
+
+        this._fillFileManagerContextFallbacks(contexts);
+
+        return [...contexts.values()].map(context => {
+            const { _attachmentKeys, ...cleanContext } = context;
+            return cleanContext;
+        });
+    }
+
+    _inferWindowContextAttachment(config, context, recentFiles) {
+        const title = String(config?.title || '').trim();
+        if (!title) return null;
+        const recentFileList = Array.isArray(recentFiles) ? recentFiles : [];
+
+        const appItem = {
+            appId: context?.appId || config?.app_id || '',
+            value: context?.appId || config?.app_id || '',
+            label: context?.label || config?.wm_class || ''
+        };
+
+        if (this._isFileManagerApp(appItem)) {
+            const folderAttachment = this._inferFolderContextAttachment(config, recentFileList);
+            if (folderAttachment && !this._isGenericFileManagerTitle(title)) return folderAttachment;
+            const titleFolderAttachment = this._inferFolderContextAttachmentFromTitle(config);
+            if (titleFolderAttachment) return titleFolderAttachment;
+            const searchedFolderAttachment = this._inferFolderContextAttachmentByTitleSearch(config, recentFileList);
+            if (searchedFolderAttachment) return searchedFolderAttachment;
+        }
+
+        if (!this._canCaptureFileContextForApp(appItem)) return null;
+
+        const titlePathAttachment = this._inferContextAttachmentFromTitle(config, appItem);
+        if (titlePathAttachment) return titlePathAttachment;
+
+        if (recentFileList.length === 0) return null;
+
+        const matches = recentFileList.filter(candidate => this._recentFileMatchesWindowTitle(candidate, title));
+        if (matches.length === 0) return null;
+
+        const candidate = this._selectRecentFileContextMatch(matches, title);
+        if (!candidate) return null;
+
+        return this._createCapturedContextAttachmentForApp(candidate.path, appItem, {
+            label: candidate.basename,
+            uri: candidate.uri,
+            contentType: candidate.contentType || ''
+        });
+    }
+
+    _canCaptureFileContextForApp(appItem) {
+        return this._isOfficeApp(appItem) ||
+            this._isPdfReaderApp(appItem) ||
+            this._isTextEditorApp(appItem) ||
+            this._isCodeLikeApp(appItem);
+    }
+
+    _inferFolderContextAttachment(config, recentFiles) {
+        const title = String(config?.title || '').trim();
+        const candidates = this._loadFolderContextCandidates(recentFiles);
+        const matches = candidates.filter(candidate => this._folderCandidateMatchesWindowTitle(candidate, title));
+        if (matches.length === 0) return null;
+
+        const uniqueByPath = new Map();
+        for (const candidate of matches) {
+            uniqueByPath.set(candidate.path, candidate);
+        }
+        if (uniqueByPath.size !== 1) return null;
+
+        const candidate = [...uniqueByPath.values()][0];
+        return {
+            type: 'folder',
+            label: candidate.basename,
+            value: candidate.uri,
+            uri: candidate.uri,
+            path: candidate.path,
+            iconName: 'folder-symbolic',
+            contentType: 'inode/directory',
+            source: 'captured'
+        };
+    }
+
+    _inferContextAttachmentFromTitle(config, appItem) {
+        const title = String(config?.title || '').trim();
+        if (!title) return null;
+
+        const pathCandidates = this._extractContextPathCandidatesFromTitle(title);
+        for (const path of pathCandidates) {
+            const attachment = this._createCapturedContextAttachmentForApp(path, appItem);
+            if (attachment) return attachment;
+        }
+
+        return null;
+    }
+
+    _inferFolderContextAttachmentFromTitle(config) {
+        const title = String(config?.title || '').trim();
+        if (!title) return null;
+
+        const pathCandidates = this._extractContextPathCandidatesFromTitle(title);
+        for (const path of pathCandidates) {
+            const attachment = this._createCapturedFolderAttachment(path);
+            if (attachment) return attachment;
+        }
+
+        return null;
+    }
+
+    _inferFolderContextAttachmentByTitleSearch(config, recentFiles) {
+        const title = String(config?.title || '').trim();
+        if (!title || this._isGenericFileManagerTitle(title)) return null;
+
+        const titleKey = this._normalizeContextTitle(title);
+        if (!titleKey || titleKey.length < 3) return null;
+
+        const matches = this._findFolderPathsByTitleKey(titleKey, recentFiles);
+        if (matches.length !== 1) return null;
+
+        return this._createCapturedFolderAttachment(matches[0], {
+            label: title
+        });
+    }
+
+    _findFolderPathsByTitleKey(titleKey, recentFiles) {
+        const roots = this._folderTitleSearchRoots(recentFiles);
+        const matches = new Map();
+        let visited = 0;
+        const startedAtUs = GLib.get_monotonic_time();
+        const timedOut = () => {
+            const elapsedMs = (GLib.get_monotonic_time() - startedAtUs) / 1000;
+            return elapsedMs >= FOLDER_TITLE_SEARCH_MAX_MS;
+        };
+
+        const visit = (path, depth) => {
+            if (!path ||
+                depth > FOLDER_TITLE_SEARCH_MAX_DEPTH ||
+                visited >= FOLDER_TITLE_SEARCH_MAX_VISITS ||
+                timedOut()) {
+                return;
+            }
+
+            let file = null;
+            try {
+                file = Gio.File.new_for_path(path);
+                if (!file.query_exists(null)) return;
+                if (file.query_file_type(Gio.FileQueryInfoFlags.NONE, null) !== Gio.FileType.DIRECTORY) return;
+            } catch (e) {
+                return;
+            }
+
+            visited++;
+            const basename = file.get_basename?.() || '';
+            if (basename && this._normalizeContextTitle(basename) === titleKey) {
+                matches.set(path, path);
+            }
+
+            if (depth >= FOLDER_TITLE_SEARCH_MAX_DEPTH ||
+                visited >= FOLDER_TITLE_SEARCH_MAX_VISITS ||
+                timedOut()) {
+                return;
+            }
+
+            let enumerator = null;
+            try {
+                enumerator = file.enumerate_children(
+                    'standard::name,standard::type',
+                    Gio.FileQueryInfoFlags.NONE,
+                    null
+                );
+
+                let info = null;
+                while ((info = enumerator.next_file(null)) !== null &&
+                    visited < FOLDER_TITLE_SEARCH_MAX_VISITS &&
+                    !timedOut()) {
+                    if (info.get_file_type?.() !== Gio.FileType.DIRECTORY) continue;
+
+                    const name = info.get_name?.() || '';
+                    if (!name ||
+                        name.startsWith('.') ||
+                        FOLDER_TITLE_SEARCH_SKIP_NAMES.has(name)) {
+                        continue;
+                    }
+
+                    visit(GLib.build_filenamev([path, name]), depth + 1);
+                }
+            } catch (e) {
+                // Directory title search is best-effort.
+            } finally {
+                try {
+                    enumerator?.close(null);
+                } catch (e) {
+                    // Enumerator may already be closed.
+                }
+            }
+        };
+
+        for (const root of roots) {
+            visit(root, 0);
+            if (matches.size > 1) break;
+            if (visited >= FOLDER_TITLE_SEARCH_MAX_VISITS) break;
+            if (timedOut()) break;
+        }
+
+        return [...matches.values()];
+    }
+
+    _folderTitleSearchRoots(recentFiles) {
+        const roots = new Map();
+        const addRoot = path => {
+            const value = String(path ?? '').trim();
+            if (value) roots.set(value, value);
+        };
+
+        for (const recent of recentFiles || []) {
+            try {
+                const file = Gio.File.new_for_path(recent.path);
+                const parentPath = file.get_parent?.()?.get_path?.() || '';
+                if (parentPath) addRoot(parentPath);
+            } catch (e) {
+                // Ignore invalid recent entries.
+            }
+        }
+
+        const home = GLib.get_home_dir();
+        addRoot(GLib.build_filenamev([home, 'Projects']));
+        addRoot(GLib.build_filenamev([home, 'Project']));
+        addRoot(GLib.build_filenamev([home, 'Code']));
+        addRoot(GLib.build_filenamev([home, 'Development']));
+        addRoot(GLib.build_filenamev([home, 'Workspace']));
+        addRoot(GLib.build_filenamev([home, 'workspace']));
+
+        const specialDirs = [
+            GLib.UserDirectory.DIRECTORY_DESKTOP,
+            GLib.UserDirectory.DIRECTORY_DOCUMENTS,
+            GLib.UserDirectory.DIRECTORY_DOWNLOAD,
+            GLib.UserDirectory.DIRECTORY_MUSIC,
+            GLib.UserDirectory.DIRECTORY_PICTURES,
+            GLib.UserDirectory.DIRECTORY_PUBLIC_SHARE,
+            GLib.UserDirectory.DIRECTORY_TEMPLATES,
+            GLib.UserDirectory.DIRECTORY_VIDEOS
+        ];
+
+        for (const directory of specialDirs) {
+            try {
+                addRoot(GLib.get_user_special_dir(directory));
+            } catch (e) {
+                // Some systems do not configure every special directory.
+            }
+        }
+
+        return [...roots.values()];
+    }
+
+    _extractContextPathCandidatesFromTitle(title) {
+        const candidates = [];
+        const addCandidate = path => {
+            const expanded = this._expandContextPath(path);
+            if (expanded && !candidates.includes(expanded)) candidates.push(expanded);
+        };
+        const text = String(title ?? '').trim();
+        if (!text) return candidates;
+
+        const parenthesizedPathRe = /\(([^)]*(?:~|\/)[^)]*)\)/g;
+        let match = null;
+        while ((match = parenthesizedPathRe.exec(text)) !== null) {
+            const folderPath = this._expandContextPath(match[1]);
+            if (!folderPath) continue;
+
+            addCandidate(folderPath);
+
+            const before = text.slice(0, match.index)
+                .replace(/\s+[-–—]\s*$/u, '')
+                .trim();
+            const basename = before.split(/[\\/]/).pop()?.trim() || '';
+            if (basename && !/[\\/]/.test(basename)) {
+                addCandidate(GLib.build_filenamev([folderPath, basename]));
+            }
+        }
+
+        const pathLikeRe = /(?:file:\/\/|~\/|\/)[^\s"'<>]+(?:\s[^\s"'<>()[\]{}|]+)*/g;
+        while ((match = pathLikeRe.exec(text)) !== null) {
+            addCandidate(match[0]);
+        }
+
+        return candidates;
+    }
+
+    _expandContextPath(value) {
+        let text = String(value ?? '').trim();
+        if (!text) return '';
+
+        text = text
+            .replace(/^["']|["']$/g, '')
+            .replace(/[),.;:]+$/g, '')
+            .trim();
+
+        try {
+            if (text.startsWith('file://')) {
+                return Gio.File.new_for_uri(text).get_path?.() || '';
+            }
+        } catch (e) {
+            return '';
+        }
+
+        if (text === '~') return GLib.get_home_dir();
+        if (text.startsWith('~/')) {
+            return GLib.build_filenamev([GLib.get_home_dir(), text.slice(2)]);
+        }
+
+        return GLib.path_is_absolute(text) ? text : '';
+    }
+
+    _createCapturedFileAttachment(path, options = {}) {
+        const value = String(path ?? '').trim();
+        if (!value) return null;
+
+        try {
+            const file = options.uri ? Gio.File.new_for_uri(options.uri) : Gio.File.new_for_path(value);
+            if (!file.query_exists(null)) return null;
+            if (file.query_file_type(Gio.FileQueryInfoFlags.NONE, null) !== Gio.FileType.REGULAR) return null;
+
+            const info = this._queryFileInfo(file);
+            return {
+                type: 'file',
+                label: options.label || file.get_basename?.() || value,
+                value: file.get_uri(),
+                uri: file.get_uri(),
+                path: file.get_path?.() || value,
+                iconName: options.iconName || 'text-x-generic-symbolic',
+                contentType: options.contentType || this._getContentType(info),
+                source: 'captured'
+            };
+        } catch (e) {
+            return null;
+        }
+    }
+
+    _createCapturedFolderAttachment(path, options = {}) {
+        const value = String(path ?? '').trim();
+        if (!value) return null;
+
+        try {
+            const file = options.uri ? Gio.File.new_for_uri(options.uri) : Gio.File.new_for_path(value);
+            if (!file.query_exists(null)) return null;
+            if (file.query_file_type(Gio.FileQueryInfoFlags.NONE, null) !== Gio.FileType.DIRECTORY) return null;
+
+            return {
+                type: 'folder',
+                label: options.label || file.get_basename?.() || this._shortenHomePath(file.get_path?.() || value),
+                value: file.get_uri(),
+                uri: file.get_uri(),
+                path: file.get_path?.() || value,
+                iconName: options.iconName || 'folder-symbolic',
+                contentType: 'inode/directory',
+                source: 'captured'
+            };
+        } catch (e) {
+            return null;
+        }
+    }
+
+    _createCapturedContextAttachmentForApp(path, appItem, options = {}) {
+        const fileAttachment = this._createCapturedFileAttachment(path, options);
+        if (fileAttachment) return fileAttachment;
+
+        if (this._isCodeLikeApp(appItem)) {
+            return this._createCapturedFolderAttachment(path, options);
+        }
+
+        return null;
+    }
+
+    _selectRecentFileContextMatch(matches, title) {
+        const uniqueByUri = new Map();
+        for (const candidate of matches || []) {
+            if (candidate?.uri) uniqueByUri.set(candidate.uri, candidate);
+        }
+
+        if (uniqueByUri.size === 0) return null;
+        if (uniqueByUri.size === 1) return [...uniqueByUri.values()][0];
+
+        const titleText = this._normalizeContextTitle(title);
+        const scored = [...uniqueByUri.values()]
+            .map(candidate => ({
+                candidate,
+                score: this._scoreRecentFileTitleMatch(candidate, titleText)
+            }))
+            .filter(item => item.score > 0)
+            .sort((a, b) => {
+                if (b.score !== a.score) return b.score - a.score;
+                return (b.candidate.timestamp || 0) - (a.candidate.timestamp || 0);
+            });
+
+        if (scored.length === 0) return null;
+        if (scored.length === 1) return scored[0].candidate;
+
+        const [best, second] = scored;
+        if (best.score > second.score) return best.candidate;
+
+        return null;
+    }
+
+    _scoreRecentFileTitleMatch(candidate, titleText) {
+        const title = String(titleText ?? '');
+        if (!title) return 0;
+
+        const basename = this._normalizeContextTitle(candidate?.basename);
+        const stem = this._normalizeContextTitle(candidate?.stem);
+        let score = 0;
+
+        if (basename && title.includes(basename)) {
+            score = Math.max(score, title === basename ? 80 : 60);
+        }
+        if (stem && title.includes(stem)) {
+            score = Math.max(score, title === stem ? 50 : 35);
+        }
+
+        const parentPath = this._shortenHomePath(this._parentPath(candidate?.path || ''));
+        const normalizedParent = this._normalizeContextTitle(parentPath);
+        if (normalizedParent && title.includes(normalizedParent)) {
+            score += 30;
+        }
+
+        return score;
+    }
+
+    _fillFileManagerContextFallbacks(contexts) {
+        if (!(contexts instanceof Map) || contexts.size === 0) return;
+
+        const inferredFolders = new Map();
+        const addFolderPath = path => {
+            const folder = this._createCapturedFolderAttachment(path);
+            if (folder?.path) inferredFolders.set(folder.path, folder);
+        };
+
+        for (const context of contexts.values()) {
+            const appItem = {
+                appId: context?.appId || '',
+                value: context?.appId || '',
+                label: context?.label || ''
+            };
+            if (this._isFileManagerApp(appItem)) continue;
+
+            for (const attachment of context?.attachments || []) {
+                if (attachment?.type === 'folder') {
+                    addFolderPath(attachment.path || '');
+                } else if (attachment?.type === 'file') {
+                    addFolderPath(this._parentPath(attachment.path || ''));
+                }
+            }
+        }
+
+        if (inferredFolders.size !== 1) return;
+        const folderAttachment = [...inferredFolders.values()][0];
+
+        for (const context of contexts.values()) {
+            const appItem = {
+                appId: context?.appId || '',
+                value: context?.appId || '',
+                label: context?.label || ''
+            };
+            if (!this._isFileManagerApp(appItem)) continue;
+            if (Array.isArray(context.attachments) && context.attachments.length > 0) continue;
+
+            const key = `${folderAttachment.type}:${folderAttachment.uri || folderAttachment.path}`.toLowerCase();
+            context.attachments.push(folderAttachment);
+            context._attachmentKeys?.add?.(key);
+        }
+    }
+
+    _parentPath(path) {
+        const value = String(path ?? '').trim();
+        if (!value) return '';
+
+        try {
+            const file = Gio.File.new_for_path(value);
+            return file.get_parent?.()?.get_path?.() || '';
+        } catch (e) {
+            return '';
+        }
+    }
+
+    _loadFolderContextCandidates(recentFiles) {
+        const candidates = new Map();
+        const addDir = (path, aliases = []) => {
+            const dirPath = String(path ?? '').trim();
+            if (!dirPath || candidates.has(dirPath)) return;
+
+            try {
+                const file = Gio.File.new_for_path(dirPath);
+                if (!file.query_exists(null)) return;
+                if (file.query_file_type(Gio.FileQueryInfoFlags.NONE, null) !== Gio.FileType.DIRECTORY) return;
+
+                candidates.set(dirPath, {
+                    path: dirPath,
+                    uri: file.get_uri(),
+                    basename: file.get_basename?.() || dirPath,
+                    aliases
+                });
+            } catch (e) {
+                // Directory context inference is best-effort.
+            }
+        };
+
+        const home = GLib.get_home_dir();
+        addDir(home, ['home']);
+
+        const specialDirs = [
+            ['desktop', GLib.UserDirectory.DIRECTORY_DESKTOP],
+            ['documents', GLib.UserDirectory.DIRECTORY_DOCUMENTS],
+            ['downloads', GLib.UserDirectory.DIRECTORY_DOWNLOAD],
+            ['music', GLib.UserDirectory.DIRECTORY_MUSIC],
+            ['pictures', GLib.UserDirectory.DIRECTORY_PICTURES],
+            ['public', GLib.UserDirectory.DIRECTORY_PUBLIC_SHARE],
+            ['templates', GLib.UserDirectory.DIRECTORY_TEMPLATES],
+            ['videos', GLib.UserDirectory.DIRECTORY_VIDEOS]
+        ];
+
+        for (const [alias, directory] of specialDirs) {
+            try {
+                addDir(GLib.get_user_special_dir(directory), [alias]);
+            } catch (e) {
+                // Some systems do not configure every special directory.
+            }
+        }
+
+        for (const recent of recentFiles || []) {
+            try {
+                const file = Gio.File.new_for_path(recent.path);
+                const parent = file.get_parent?.();
+                const parentPath = parent?.get_path?.() || '';
+                if (parentPath) addDir(parentPath);
+            } catch (e) {
+                // Ignore invalid recent entries.
+            }
+        }
+
+        return [...candidates.values()];
+    }
+
+    _folderCandidateMatchesWindowTitle(candidate, title) {
+        const titleText = this._normalizeContextTitle(title);
+        if (!titleText) return false;
+
+        const names = [
+            candidate?.basename,
+            ...(Array.isArray(candidate?.aliases) ? candidate.aliases : [])
+        ].map(name => this._normalizeContextTitle(name))
+            .filter(name => name.length >= 3);
+
+        return names.some(name => titleText.includes(name));
+    }
+
+    _isGenericFileManagerTitle(title) {
+        const titleText = this._normalizeContextTitle(title);
+        return [
+            'home',
+            'files',
+            'recent',
+            'starred',
+            'trash',
+            'network',
+            'computer',
+            'other locations'
+        ].includes(titleText);
+    }
+
+    _loadRecentFileCandidates() {
+        const recentPath = GLib.build_filenamev([GLib.get_user_data_dir(), 'recently-used.xbel']);
+        const recentFile = Gio.File.new_for_path(recentPath);
+        if (!recentFile.query_exists(null)) return [];
+
+        try {
+            const [, contents] = recentFile.load_contents(null);
+            const text = imports.byteArray.toString(contents);
+            const candidates = [];
+            const bookmarkRe = /<bookmark\b([^>]*)>([\s\S]*?)<\/bookmark>/g;
+            let match = null;
+
+            while ((match = bookmarkRe.exec(text)) !== null) {
+                const attrs = match[1] || '';
+                const body = match[2] || '';
+                const href = this._decodeXmlEntities(this._extractXmlAttribute(attrs, 'href'));
+                if (!href || !href.startsWith('file://')) continue;
+
+                const file = Gio.File.new_for_uri(href);
+                if (!file.query_exists(null)) continue;
+
+                const path = file.get_path?.() || '';
+                const basename = file.get_basename?.() || '';
+                if (!path || !basename) continue;
+
+                const contentType = this._decodeXmlEntities(
+                    this._extractXmlAttribute(body, 'type')
+                );
+                const modified = this._extractXmlAttribute(attrs, 'modified') ||
+                    this._extractXmlAttribute(attrs, 'visited') ||
+                    this._extractXmlAttribute(body, 'modified') ||
+                    this._extractXmlAttribute(body, 'visited');
+
+                candidates.push({
+                    uri: href,
+                    path,
+                    basename,
+                    stem: this._fileStem(basename),
+                    contentType,
+                    timestamp: Date.parse(modified || '') || 0
+                });
+            }
+
+            candidates.sort((a, b) => b.timestamp - a.timestamp);
+            return candidates;
+        } catch (e) {
+            logError(`Failed to read recent files for workspace capture: ${e.message}`);
+            return [];
+        }
+    }
+
+    _recentFileMatchesWindowTitle(candidate, title) {
+        const titleText = this._normalizeContextTitle(title);
+        if (!titleText) return false;
+
+        const names = [candidate?.basename, candidate?.stem]
+            .map(name => this._normalizeContextTitle(name))
+            .filter(name => name.length >= 3);
+
+        return names.some(name => titleText.includes(name));
+    }
+
+    _normalizeContextTitle(value) {
+        return normalize(String(value ?? '')
+            .replace(/\.[A-Za-z0-9]{1,8}\b/g, match => match.toLowerCase())
+            .replace(/[_-]+/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim());
+    }
+
+    _fileStem(basename) {
+        const value = String(basename ?? '').trim();
+        const dot = value.lastIndexOf('.');
+        if (dot > 0) return value.slice(0, dot);
+        return value;
+    }
+
+    _extractXmlAttribute(text, name) {
+        const pattern = new RegExp(`${name}="([^"]*)"`);
+        return String(text ?? '').match(pattern)?.[1] || '';
+    }
+
+    _decodeXmlEntities(value) {
+        return String(value ?? '')
+            .replace(/&quot;/g, '"')
+            .replace(/&apos;/g, "'")
+            .replace(/&lt;/g, '<')
+            .replace(/&gt;/g, '>')
+            .replace(/&amp;/g, '&');
+    }
+
+    _openShelfRecord(record) {
+        const item = record?.shelfItem;
+        if (!item) return;
+
+        this._touchShelfRecord(record);
+
+        if (item.type === 'url') {
+            this._openUri(item.value || item.uri);
+            return;
+        }
+
+        if (item.type === 'file' || item.type === 'folder') {
+            this._openUri(item.uri || (item.path ? Gio.File.new_for_path(item.path).get_uri() : ''));
+            return;
+        }
+
+        if (item.type === 'app') {
+            this._openShelfAppItem(item);
+            return;
+        }
+
+        if (item.type === 'workspace') {
+            this._openShelfWorkspaceItem(item);
+            return;
+        }
+
+        this._copyText(item.value);
+        this._notifyShelf('Copied shelf text to clipboard.');
+    }
+
+    _openShelfWorkspaceAppRecord(record) {
+        const context = record?.shelfItem;
+        if (!context) return;
+
+        const parent = record?.parentWorkspaceItem;
+        if (parent?.id) this._shelf?.touch?.(parent.id);
+        this._openShelfAppItem(context);
+    }
+
+    _openShelfWorkspaceItem(item) {
+        const profileName = item.profileName || item.value || '';
+        const contexts = Array.isArray(item.contexts)
+            ? item.contexts.map(context => ({ ...context }))
+            : [];
+        const restoreContexts = this._workspaceRestoreContexts(contexts);
+        const additiveContexts = this._workspaceAdditiveContexts(contexts);
+
+        this._shelf?.touch?.(item.id);
+        const hasRestoreContextAttachments = restoreContexts.some(context =>
+            Array.isArray(context.attachments) && context.attachments.length > 0);
+        const hasAdditiveContextAttachments = additiveContexts.some(context =>
+            Array.isArray(context.attachments) && context.attachments.length > 0);
+        const overridesSet = hasRestoreContextAttachments
+            ? this._setWorkspaceContextLaunchOverrides(profileName, restoreContexts)
+            : false;
+        const restored = profileName ? this._applyWorkspaceProfile(profileName) : false;
+        const autoLaunchesProfileApps = restored && this._workspaceProfilesAutoLaunchEnabled();
+        const profileEngineWillOpenContexts = autoLaunchesProfileApps && overridesSet;
+        const additiveDelay = restored && autoLaunchesProfileApps ? 1700 : 250;
+
+        if (restored) {
+            this._notifyShelf(`Restoring workspace context "${item.label || profileName}".`);
+        } else if (profileName) {
+            this._notifyShelf(`Opening context apps for "${item.label || profileName}".`);
+        }
+
+        if (profileEngineWillOpenContexts) {
+            if (hasAdditiveContextAttachments) {
+                this._openWorkspaceAdditiveContexts(additiveContexts, additiveDelay);
+            }
+            return;
+        }
+
+        if (restored && autoLaunchesProfileApps) {
+            const followUpContexts = hasRestoreContextAttachments && !overridesSet
+                ? contexts
+                : additiveContexts;
+            if (followUpContexts.length > 0) {
+                this._openWorkspaceAdditiveContexts(followUpContexts, additiveDelay);
+            }
+            return;
+        }
+
+        const baseDelay = restored && autoLaunchesProfileApps ? 1300 : 120;
+        contexts.forEach((context, index) => {
+            GLib.timeout_add(GLib.PRIORITY_DEFAULT, baseDelay + index * 180, () => {
+                if (autoLaunchesProfileApps) {
+                    if (Array.isArray(context.attachments) && context.attachments.length > 0) {
+                        this._openShelfAppAttachments(context, 0, { preferAppSpecific: true });
+                    }
+                } else {
+                    this._openShelfAppItem(context);
+                }
+                return GLib.SOURCE_REMOVE;
+            });
+        });
+
+        if (restored && !autoLaunchesProfileApps && (hasRestoreContextAttachments || hasAdditiveContextAttachments) && profileName) {
+            const settleDelay = baseDelay + contexts.length * 220 + 1400;
+            GLib.timeout_add(GLib.PRIORITY_DEFAULT, settleDelay, () => {
+                this._applyWorkspaceProfileWithAutoLaunch(profileName, false);
+                return GLib.SOURCE_REMOVE;
+            });
+        }
+    }
+
+    _workspaceRestoreContexts(contexts) {
+        return this._workspaceContextsWithAttachments(contexts, attachment =>
+            !this._isManualWorkspaceAttachment(attachment));
+    }
+
+    _workspaceAdditiveContexts(contexts) {
+        return this._workspaceContextsWithAttachments(contexts, attachment =>
+            this._isManualWorkspaceAttachment(attachment));
+    }
+
+    _workspaceContextsWithAttachments(contexts, predicate) {
+        return (Array.isArray(contexts) ? contexts : [])
+            .map(context => {
+                const attachments = Array.isArray(context.attachments)
+                    ? context.attachments.filter(predicate)
+                    : [];
+                return {
+                    ...context,
+                    attachments
+                };
+            })
+            .filter(context => context.attachments.length > 0);
+    }
+
+    _isManualWorkspaceAttachment(attachment) {
+        return String(attachment?.source || '').toLowerCase() === 'manual';
+    }
+
+    _openWorkspaceAdditiveContexts(contexts, baseDelay = 250) {
+        const withAttachments = (Array.isArray(contexts) ? contexts : [])
+            .filter(context => Array.isArray(context.attachments) && context.attachments.length > 0);
+
+        withAttachments.forEach((context, index) => {
+            GLib.timeout_add(GLib.PRIORITY_DEFAULT, Math.max(0, baseDelay + index * 220), () => {
+                this._openShelfAppAttachments(context, 0, { preferAppSpecific: true });
+                return GLib.SOURCE_REMOVE;
+            });
+        });
+    }
+
+    _setWorkspaceContextLaunchOverrides(profileName, contexts) {
+        if (!profileName || !global.gnome_essentials_profiles) return false;
+
+        try {
+            const profiles = global.gnome_essentials_profiles;
+            if (typeof profiles.setContextLaunchOverrides === 'function') {
+                return profiles.setContextLaunchOverrides(profileName, contexts);
+            }
+        } catch (e) {
+            logError(`Failed to set workspace context launch overrides: ${e.message}`);
+        }
+
+        return false;
+    }
+
+    _openShelfAppItem(item) {
+        const appId = item.appId || item.value;
+        const profileName = item.profileName || '';
+
+        if (!appId) return;
+
+        this._shelf?.touch?.(item.id);
+        const profileHasApp = profileName && this._profileContainsApp(profileName, appId);
+
+        if (profileHasApp && this._workspaceProfilesAutoLaunchEnabled()) {
+            if (this._applyWorkspaceProfile(profileName)) {
+                this._notifyShelf(`Restoring "${profileName}" for ${item.label}.`);
+                this._openShelfAppAttachments(item, 1200);
+                return;
+            }
+        }
+
+        const contextWillLaunchApp = this._openShelfAppAttachments(item, profileHasApp ? 1300 : 120, {
+            preferAppSpecific: true
+        });
+        if (contextWillLaunchApp) {
+            if (profileHasApp) {
+                GLib.timeout_add(GLib.PRIORITY_DEFAULT, 900, () => {
+                    this._applyWorkspaceProfile(profileName);
+                    return GLib.SOURCE_REMOVE;
+                });
+            }
+            return;
+        }
+
+        if (!this._launchAppById(appId, item.label)) {
+            this._notifyShelf(`"${item.label || appId}" is not installed.`);
+            return;
+        }
+
+        if (profileHasApp) {
+            GLib.timeout_add(GLib.PRIORITY_DEFAULT, 900, () => {
+                this._applyWorkspaceProfile(profileName);
+                return GLib.SOURCE_REMOVE;
+            });
+        }
+
+        this._openShelfAppAttachments(item, profileHasApp ? 1300 : 450, {
+            preferAppSpecific: false
+        });
+    }
+
+    _openShelfAppAttachments(item, delayMs = 500, options = {}) {
+        const attachments = Array.isArray(item?.attachments)
+            ? item.attachments.map(attachment => ({ ...attachment }))
+            : [];
+        if (attachments.length === 0) return false;
+
+        const preferAppSpecific = options.preferAppSpecific ?? true;
+        const actions = preferAppSpecific
+            ? attachments.map(attachment => this._createAppSpecificAttachmentAction(item, attachment))
+            : attachments.map(() => null);
+        const handledAttachments = new Set();
+        const willLaunchApp = actions.some(action => action?.launchesApp);
+
+        GLib.timeout_add(GLib.PRIORITY_DEFAULT, Math.max(0, delayMs), () => {
+            let opened = 0;
+            let notes = 0;
+            let appSpecificOpened = 0;
+
+            for (const action of actions) {
+                if (!action) continue;
+
+                try {
+                    if (action.run()) {
+                        appSpecificOpened++;
+                        handledAttachments.add(action.attachmentId);
+                    }
+                } catch (e) {
+                    logError(`Failed to open app-specific attachment "${action.label}": ${e.message}`);
+                }
+            }
+
+            for (const attachment of attachments) {
+                if (handledAttachments.has(attachment.id)) continue;
+
+                try {
+                    if (attachment.type === 'url') {
+                        this._openUri(attachment.value || attachment.uri);
+                        opened++;
+                    } else if (attachment.type === 'file' || attachment.type === 'folder') {
+                        this._openUri(attachment.uri || (attachment.path ? Gio.File.new_for_path(attachment.path).get_uri() : ''));
+                        opened++;
+                    } else if (attachment.type === 'text') {
+                        notes++;
+                    }
+                } catch (e) {
+                    logError(`Failed to open app context attachment "${attachment.label}": ${e.message}`);
+                }
+            }
+
+            if (appSpecificOpened > 0 || opened > 0 || notes > 0) {
+                const parts = [];
+                if (appSpecificOpened > 0) parts.push(`${appSpecificOpened} context item${appSpecificOpened === 1 ? '' : 's'} opened in ${item.label}`);
+                if (opened > 0) parts.push(`${opened} item${opened === 1 ? '' : 's'} opened`);
+                if (notes > 0) parts.push(`${notes} note${notes === 1 ? '' : 's'} available in Shelf`);
+                this._notifyShelf(parts.join(', ') + '.');
+            }
+
+            return GLib.SOURCE_REMOVE;
+        });
+
+        return willLaunchApp;
+    }
+
+    _createAppSpecificAttachmentAction(appItem, attachment) {
+        const appId = appItem?.appId || appItem?.value || '';
+        const label = attachment?.label || attachment?.value || 'Attachment';
+        const attachmentId = attachment?.id || `${attachment?.type}:${attachment?.value || attachment?.uri || attachment?.path || label}`;
+
+        if (this._isBrowserApp(appItem) && attachment?.type === 'url') {
+            return {
+                attachmentId,
+                label,
+                launchesApp: true,
+                run: () => this._launchAppWithUris(appId, [attachment.value || attachment.uri])
+            };
+        }
+
+        if (this._isCodeLikeApp(appItem)) {
+            const path = this._pathFromAttachment(attachment) ||
+                (attachment?.type === 'text' ? this._createContextNoteFile(appItem, attachment)?.get_path?.() : '');
+            const command = this._getCodeLikeCommand(appItem);
+            if (path && command.length > 0) {
+                return {
+                    attachmentId,
+                    label,
+                    launchesApp: true,
+                    run: () => this._spawnCommand([...command, path])
+                };
+            }
+        }
+
+        if (this._isTextEditorApp(appItem)) {
+            if (attachment?.type === 'text') {
+                return {
+                    attachmentId,
+                    label,
+                    launchesApp: true,
+                    run: () => {
+                        const file = this._createContextNoteFile(appItem, attachment);
+                        return file ? this._launchAppWithFiles(appId, [file]) : false;
+                    }
+                };
+            }
+
+            if (attachment?.type === 'file') {
+                const file = this._fileFromAttachment(attachment);
+                if (file) {
+                    return {
+                        attachmentId,
+                        label,
+                        launchesApp: true,
+                        run: () => this._launchAppWithFiles(appId, [file])
+                    };
+                }
+            }
+        }
+
+        if (this._isFileManagerApp(appItem) && (attachment?.type === 'folder' || attachment?.type === 'file')) {
+            const file = this._fileFromAttachment(attachment);
+            const target = attachment?.type === 'folder'
+                ? file
+                : file?.get_parent?.();
+            if (target) {
+                return {
+                    attachmentId,
+                    label,
+                    launchesApp: true,
+                    run: () => this._launchAppWithFiles(appId, [target])
+                };
+            }
+        }
+
+        if (this._isPdfReaderApp(appItem) && this._pdfReaderCanOpenAttachment(attachment)) {
+            const file = this._fileFromAttachment(attachment);
+            if (file) {
+                return {
+                    attachmentId,
+                    label,
+                    launchesApp: true,
+                    run: () => this._launchAppWithFiles(appId, [file])
+                };
+            }
+        }
+
+        if (this._isOfficeApp(appItem)) {
+            if (attachment?.type === 'text' && this._officeAppAcceptsText(appItem)) {
+                return {
+                    attachmentId,
+                    label,
+                    launchesApp: true,
+                    run: () => {
+                        const file = this._createContextNoteFile(appItem, attachment);
+                        return file ? this._launchAppWithFiles(appId, [file]) : false;
+                    }
+                };
+            }
+
+            if (attachment?.type === 'file' && this._officeAppCanOpenAttachment(appItem, attachment)) {
+                const file = this._fileFromAttachment(attachment);
+                if (file) {
+                    return {
+                        attachmentId,
+                        label,
+                        launchesApp: true,
+                        run: () => this._launchAppWithFiles(appId, [file])
+                    };
+                }
+            }
+        }
+
+        if (this._isTerminalApp(appItem)) {
+            const cwd = this._folderPathFromAttachment(attachment);
+            const command = this._getTerminalCommand(appItem, cwd);
+            if (cwd && command.length > 0) {
+                return {
+                    attachmentId,
+                    label,
+                    launchesApp: true,
+                    run: () => this._spawnCommand(command, cwd)
+                };
+            }
+        }
+
+        return null;
+    }
+
+    _isBrowserApp(appItem) {
+        const identity = this._appIdentityText(appItem);
+        return /chrome|chromium|firefox|browser|brave|vivaldi|librewolf|edge|opera/.test(identity);
+    }
+
+    _isCodeLikeApp(appItem) {
+        const identity = this._appIdentityText(appItem);
+        return /visual studio code|vscode|code\.desktop|code-oss|codium|cursor/.test(identity);
+    }
+
+    _isTextEditorApp(appItem) {
+        const identity = this._appIdentityText(appItem);
+        return /texteditor|text editor|gedit|kate|mousepad|xed|pluma/.test(identity);
+    }
+
+    _isTerminalApp(appItem) {
+        const identity = this._appIdentityText(appItem);
+        return /ptyxis|terminal|console|kgx|konsole|alacritty|kitty|ghostty|tilix|wezterm|xterm/.test(identity);
+    }
+
+    _isFileManagerApp(appItem) {
+        const identity = this._appIdentityText(appItem);
+        return /nautilus|org\.gnome\.files|org\.gnome\.nautilus|file manager|files\.desktop|nemo|thunar|dolphin|caja|pcmanfm/.test(identity);
+    }
+
+    _isPdfReaderApp(appItem) {
+        const identity = this._appIdentityText(appItem);
+        return /zotero|evince|papers|document viewer|okular|xournal|mupdf|zathura|atril|qpdfview|sioyek|foxit|acrobat|masterpdf|pdf arranger|pdfarranger|pdf viewer|pdf reader/.test(identity);
+    }
+
+    _pdfReaderCanOpenAttachment(attachment) {
+        if (attachment?.type !== 'file') return false;
+
+        const extension = this._attachmentExtension(attachment);
+        return PDF_READER_EXTENSIONS.has(extension);
+    }
+
+    _isOfficeApp(appItem) {
+        const identity = this._appIdentityText(appItem);
+        return /libreoffice|openoffice|onlyoffice|wps-office|wpsoffice|wps writer|wps spreadsheet|wps presentation|freeoffice|softmaker|calligra|abiword|gnumeric|office writer|office calc|office impress|word processor|wordprocessor/.test(identity);
+    }
+
+    _officeAppRole(appItem) {
+        const identity = this._appIdentityText(appItem);
+
+        if (/calc|spreadsheet|spreadsheets|excel|gnumeric|scalc|et\.desktop|office-et|sheets/.test(identity)) {
+            return 'spreadsheet';
+        }
+
+        if (/impress|presentation|presentations|powerpoint|stage|simpress|wpp\.desktop|office-wpp/.test(identity)) {
+            return 'presentation';
+        }
+
+        if (/draw|diagram|sdraw/.test(identity)) {
+            return 'drawing';
+        }
+
+        if (/base|database|sbase/.test(identity)) {
+            return 'database';
+        }
+
+        if (/writer|word|document|abiword|swriter|wps\.desktop|office-wps/.test(identity)) {
+            return 'document';
+        }
+
+        return 'suite';
+    }
+
+    _officeAppAcceptsText(appItem) {
+        const role = this._officeAppRole(appItem);
+        return role === 'suite' || role === 'document';
+    }
+
+    _officeAppCanOpenAttachment(appItem, attachment) {
+        const extension = this._attachmentExtension(attachment);
+        const role = this._officeAppRole(appItem);
+
+        if (!extension) return role === 'suite';
+
+        if (role === 'document') return OFFICE_DOCUMENT_EXTENSIONS.has(extension);
+        if (role === 'spreadsheet') return OFFICE_SPREADSHEET_EXTENSIONS.has(extension);
+        if (role === 'presentation') return OFFICE_PRESENTATION_EXTENSIONS.has(extension);
+        if (role === 'drawing') return OFFICE_DRAWING_EXTENSIONS.has(extension);
+        if (role === 'database') return OFFICE_DATABASE_EXTENSIONS.has(extension);
+
+        return OFFICE_DOCUMENT_EXTENSIONS.has(extension) ||
+            OFFICE_SPREADSHEET_EXTENSIONS.has(extension) ||
+            OFFICE_PRESENTATION_EXTENSIONS.has(extension) ||
+            OFFICE_DRAWING_EXTENSIONS.has(extension) ||
+            OFFICE_DATABASE_EXTENSIONS.has(extension);
+    }
+
+    _appIdentityText(appItem) {
+        return normalize([
+            appItem?.appId,
+            appItem?.value,
+            appItem?.label
+        ].join(' '));
+    }
+
+    _launchAppWithFiles(appId, files) {
+        const appInfo = this._getAppInfoById(appId);
+        if (!appInfo || !Array.isArray(files) || files.length === 0) return false;
+
+        const timestamp = global.get_current_time?.() ?? 0;
+        const context = global.create_app_launch_context?.(timestamp, -1) ?? null;
+        appInfo.launch(files, context);
+        return true;
+    }
+
+    _launchAppWithUris(appId, uris) {
+        const appInfo = this._getAppInfoById(appId);
+        const values = Array.isArray(uris)
+            ? uris.map(uri => String(uri ?? '').trim()).filter(Boolean)
+            : [];
+        if (!appInfo || values.length === 0) return false;
+
+        const timestamp = global.get_current_time?.() ?? 0;
+        const context = global.create_app_launch_context?.(timestamp, -1) ?? null;
+        if (typeof appInfo.launch_uris === 'function') {
+            appInfo.launch_uris(values, context);
+            return true;
+        }
+
+        return false;
+    }
+
+    _getAppInfoById(appId) {
+        try {
+            const app = this._appSystem.lookup_app(appId);
+            return app?.get_app_info?.() || app?.appInfo || null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    _getCodeLikeCommand(appItem) {
+        const identity = this._appIdentityText(appItem);
+        const appId = appItem?.appId || appItem?.value || '';
+        const candidates = [];
+
+        if (/cursor/.test(identity)) candidates.push('cursor');
+        if (/codium/.test(identity)) candidates.push('codium');
+        if (/code-oss/.test(identity)) candidates.push('code-oss');
+        if (/code|visual studio code|vscode/.test(identity)) candidates.push('code');
+        candidates.push('code', 'codium', 'code-oss', 'cursor');
+
+        for (const candidate of candidates) {
+            const path = GLib.find_program_in_path(candidate);
+            if (path) return [path];
+        }
+
+        const flatpakId = this._flatpakIdFromDesktopId(appId);
+        const flatpak = GLib.find_program_in_path('flatpak');
+        if (flatpak && flatpakId && /(code|codium|cursor)/i.test(flatpakId)) {
+            return [flatpak, 'run', flatpakId];
+        }
+
+        return [];
+    }
+
+    _getTerminalCommand(appItem, cwd) {
+        const identity = this._appIdentityText(appItem);
+        const candidates = [];
+
+        if (/ptyxis/.test(identity)) candidates.push(['ptyxis', '--working-directory', cwd]);
+        if (/gnome-terminal|terminal/.test(identity)) candidates.push(['gnome-terminal', '--working-directory', cwd]);
+        if (/kgx|console/.test(identity)) candidates.push(['kgx', '--working-directory', cwd]);
+        if (/konsole/.test(identity)) candidates.push(['konsole', '--workdir', cwd]);
+        if (/alacritty/.test(identity)) candidates.push(['alacritty', '--working-directory', cwd]);
+        if (/kitty/.test(identity)) candidates.push(['kitty', '--directory', cwd]);
+        if (/ghostty/.test(identity)) candidates.push(['ghostty', `--working-directory=${cwd}`]);
+        if (/tilix/.test(identity)) candidates.push(['tilix', '--working-directory', cwd]);
+        if (/wezterm/.test(identity)) candidates.push(['wezterm', 'start', '--cwd', cwd]);
+        if (/xterm/.test(identity)) candidates.push(['xterm']);
+
+        candidates.push(
+            ['ptyxis', '--working-directory', cwd],
+            ['gnome-terminal', '--working-directory', cwd],
+            ['kgx', '--working-directory', cwd]
+        );
+
+        for (const candidate of candidates) {
+            const path = GLib.find_program_in_path(candidate[0]);
+            if (path) return [path, ...candidate.slice(1)];
+        }
+
+        return [];
+    }
+
+    _spawnCommand(argv, cwd = '') {
+        const args = Array.isArray(argv)
+            ? argv.map(arg => String(arg ?? '')).filter(Boolean)
+            : [];
+        if (args.length === 0) return false;
+
+        const launcher = Gio.SubprocessLauncher.new(Gio.SubprocessFlags.NONE);
+        if (cwd) {
+            try {
+                launcher.set_cwd(cwd);
+            } catch (e) {
+                // Some launchers do not need cwd support if arguments carry it.
+            }
+        }
+        launcher.spawnv(args);
+        return true;
+    }
+
+    _flatpakIdFromDesktopId(appId) {
+        return String(appId ?? '')
+            .trim()
+            .replace(/\.desktop$/i, '');
+    }
+
+    _fileFromAttachment(attachment) {
+        try {
+            if (attachment?.uri) return Gio.File.new_for_uri(attachment.uri);
+            if (attachment?.path) return Gio.File.new_for_path(attachment.path);
+            if (attachment?.value?.startsWith?.('file://')) return Gio.File.new_for_uri(attachment.value);
+            if (GLib.path_is_absolute(attachment?.value || '')) return Gio.File.new_for_path(attachment.value);
+        } catch (e) {
+            logError(`Could not resolve attachment file: ${e.message}`);
+        }
+
+        return null;
+    }
+
+    _pathFromAttachment(attachment) {
+        try {
+            const file = this._fileFromAttachment(attachment);
+            return file?.get_path?.() || '';
+        } catch (e) {
+            return '';
+        }
+    }
+
+    _folderPathFromAttachment(attachment) {
+        try {
+            const file = this._fileFromAttachment(attachment);
+            if (!file) return '';
+
+            const path = file.get_path?.() || '';
+            if (!path) return '';
+
+            if (attachment?.type === 'folder') return path;
+
+            const parent = file.get_parent?.();
+            return parent?.get_path?.() || '';
+        } catch (e) {
+            return '';
+        }
+    }
+
+    _attachmentExtension(attachment) {
+        const candidates = [];
+
+        try {
+            const file = this._fileFromAttachment(attachment);
+            const basename = file?.get_basename?.();
+            if (basename) candidates.push(basename);
+        } catch (e) {
+            // Fall through to text candidates below.
+        }
+
+        candidates.push(
+            attachment?.path,
+            attachment?.uri,
+            attachment?.value,
+            attachment?.label
+        );
+
+        for (const candidate of candidates) {
+            let text = String(candidate ?? '').trim();
+            if (!text) continue;
+
+            try {
+                text = decodeURIComponent(text);
+            } catch (e) {
+                // Keep the original text if it is not URI-escaped cleanly.
+            }
+
+            const cleaned = text.split(/[?#]/)[0];
+            const basename = cleaned.split('/').pop() || cleaned;
+            const dot = basename.lastIndexOf('.');
+            if (dot > 0 && dot < basename.length - 1) {
+                return basename.slice(dot + 1).toLowerCase();
+            }
+        }
+
+        return '';
+    }
+
+    _createContextNoteFile(appItem, attachment) {
+        const text = String(attachment?.value ?? '').trim();
+        if (!text) return null;
+
+        try {
+            const dirPath = GLib.build_filenamev([
+                GLib.get_user_data_dir(),
+                'gnome-essentials',
+                CONTEXT_NOTES_DIR_NAME
+            ]);
+            const dir = Gio.File.new_for_path(dirPath);
+            if (!dir.query_exists(null)) {
+                dir.make_directory_with_parents(null);
+            }
+
+            const fileName = `${Date.now()}-${this._sanitizeFileName(appItem?.label || 'context')}-${this._sanitizeFileName(attachment?.label || 'note')}.txt`;
+            const file = Gio.File.new_for_path(GLib.build_filenamev([dirPath, fileName]));
+            file.replace_contents(
+                text + '\n',
+                null,
+                false,
+                Gio.FileCreateFlags.REPLACE_DESTINATION,
+                null
+            );
+            return file;
+        } catch (e) {
+            logError(`Failed to create context note file: ${e.message}`);
+            return null;
+        }
+    }
+
+    _sanitizeFileName(value) {
+        const text = String(value ?? '')
+            .trim()
+            .replace(/[^A-Za-z0-9._-]+/g, '-')
+            .replace(/^-+|-+$/g, '');
+        return (text || 'note').slice(0, 48);
+    }
+
+    _launchAppById(appId, label = '') {
+        try {
+            const app = this._appSystem.lookup_app(appId);
+            if (!app) return false;
+
+            this._launchApp({
+                app,
+                id: appId,
+                name: label || app.get_name?.() || appId
+            });
+            return true;
+        } catch (e) {
+            logError(`Failed to launch shelf app ${appId}: ${e.message}`);
+            return false;
+        }
+    }
+
+    _openNewWindowForRecord(record) {
+        let app = record?.app || null;
+        let appId = record?.id || '';
+        let label = record?.name || '';
+
+        if (!app && record?.kind === 'shelf-item' && record.shelfItem?.type === 'app') {
+            appId = record.shelfItem.appId || record.shelfItem.value || '';
+            label = record.shelfItem.label || appId;
+            app = appId ? this._appSystem.lookup_app(appId) : null;
+        }
+
+        if (!app && record?.kind === 'shelf-workspace-app') {
+            appId = record.shelfItem?.appId || record.shelfItem?.value || '';
+            label = record.shelfItem?.label || appId;
+            app = appId ? this._appSystem.lookup_app(appId) : null;
+        }
+
+        if (!app) {
+            Main.notify('Essential Menu', `"${label || appId || 'App'}" is not installed.`);
+            return false;
+        }
+
+        this._launchApp({
+            app,
+            id: appId || app.get_id?.() || '',
+            name: label || app.get_name?.() || appId
+        }, { forceNewWindow: true });
+        return true;
+    }
+
+    _profileContainsApp(profileName, appId) {
+        const profile = this._getWorkspaceProfileEntry(profileName);
+        const windows = Array.isArray(profile?.windows) ? profile.windows : [];
+        const target = this._normalizeAppIdForMatch(appId);
+
+        return windows.some(config => this._normalizeAppIdForMatch(config?.app_id) === target);
+    }
+
+    _getWorkspaceContextForFocusedApp(workspaceItem) {
+        const contexts = Array.isArray(workspaceItem?.contexts) ? workspaceItem.contexts : [];
+        if (contexts.length === 0) return null;
+
+        const focusedAppId = this._getFocusedAppId();
+        if (!focusedAppId) return null;
+
+        const target = this._normalizeAppIdForMatch(focusedAppId);
+        return contexts.find(context =>
+            this._normalizeAppIdForMatch(context?.appId || context?.value) === target
+        ) || null;
+    }
+
+    _getWorkspaceDropContext(workspaceItem) {
+        const contexts = Array.isArray(workspaceItem?.contexts) ? workspaceItem.contexts : [];
+        if (contexts.length === 0) return null;
+
+        const focusedContext = this._getWorkspaceContextForFocusedApp(workspaceItem);
+        if (focusedContext?.id) return focusedContext;
+
+        return contexts.length === 1 ? contexts[0] : null;
+    }
+
+    _getFocusedAppId() {
+        try {
+            const win = global.display.get_focus_window?.();
+            if (!win) return '';
+
+            const tracker = Shell.WindowTracker.get_default?.();
+            const app = tracker?.get_window_app?.(win);
+            return app?.get_id?.() || '';
+        } catch (e) {
+            return '';
+        }
+    }
+
+    _workspaceProfilesAutoLaunchEnabled() {
+        try {
+            return this._settings?.get_boolean('profiles-auto-launch') ?? true;
+        } catch (e) {
+            return true;
+        }
+    }
+
+    _getWorkspaceProfileEntry(profileName) {
+        if (!profileName) return null;
+
+        try {
+            const data = JSON.parse(this._settings?.get_string('profiles-saved-data') || '{}');
+            const profiles = data?.version === 2 && data.profiles ? data.profiles : data;
+            const entry = profiles?.[profileName];
+            if (Array.isArray(entry)) {
+                return { name: profileName, windows: entry };
+            }
+            if (entry && typeof entry === 'object' && Array.isArray(entry.windows)) {
+                return entry;
+            }
+        } catch (e) {
+            logError(`Failed to read linked workspace profile "${profileName}": ${e.message}`);
+        }
+
+        return null;
+    }
+
+    _normalizeAppIdForMatch(appId) {
+        const value = String(appId ?? '').trim().toLowerCase();
+        if (!value) return '';
+        return value.endsWith('.desktop') ? value : `${value}.desktop`;
+    }
+
+    _applyWorkspaceProfile(profileName) {
+        if (!profileName) return false;
+
+        try {
+            if (global.gnome_essentials_profiles &&
+                typeof global.gnome_essentials_profiles.applyProfile === 'function') {
+                global.gnome_essentials_profiles.applyProfile(profileName);
+                return true;
+            }
+        } catch (e) {
+            logError(`Direct workspace profile restore failed: ${e.message}`);
+        }
+
+        try {
+            this._settings?.set_boolean('profiles-enabled', true);
+            const current = this._settings?.get_string('profiles-active-profile') || '';
+            if (current === profileName) {
+                this._settings.set_string('profiles-active-profile', '');
+            }
+            GLib.timeout_add(GLib.PRIORITY_DEFAULT, 700, () => {
+                try {
+                    this._settings?.set_string('profiles-active-profile', profileName);
+                } catch (e) {
+                    logError(`Deferred workspace profile restore failed: ${e.message}`);
+                }
+                return GLib.SOURCE_REMOVE;
+            });
+            return true;
+        } catch (e) {
+            logError(`Workspace profile restore trigger failed: ${e.message}`);
+            return false;
+        }
+    }
+
+    _applyWorkspaceProfileWithAutoLaunch(profileName, autoLaunch) {
+        if (!profileName) return false;
+
+        let hadSetting = false;
+        let previousValue = false;
+        try {
+            previousValue = this._settings?.get_boolean('profiles-auto-launch') ?? true;
+            hadSetting = true;
+            if (previousValue !== autoLaunch) {
+                this._settings?.set_boolean('profiles-auto-launch', autoLaunch);
+            }
+        } catch (e) {
+            hadSetting = false;
+        }
+
+        try {
+            return this._applyWorkspaceProfile(profileName);
+        } finally {
+            if (hadSetting && previousValue !== autoLaunch) {
+                try {
+                    this._settings?.set_boolean('profiles-auto-launch', previousValue);
+                } catch (e) {
+                    logError(`Failed to restore profile auto-launch setting: ${e.message}`);
+                }
+            }
+        }
+    }
+
+    _copyShelfRecord(record) {
+        const item = record?.shelfItem;
+        if (!item) return;
+
+        this._copyText(item.path || item.uri || item.value || '');
+        this._touchShelfRecord(record);
+        this._notifyShelf(`Copied "${item.label}".`);
+    }
+
+    _revealShelfRecord(record) {
+        const item = record?.shelfItem;
+        if (!item || (item.type !== 'file' && item.type !== 'folder')) return;
+
+        try {
+            const file = item.uri
+                ? Gio.File.new_for_uri(item.uri)
+                : Gio.File.new_for_path(item.path);
+            const target = item.type === 'folder' ? file : file.get_parent();
+            if (target) {
+                this._openUri(target.get_uri());
+                this._touchShelfRecord(record);
+                const action = item.type === 'folder' ? 'Opened folder' : 'Opened containing folder for';
+                this._notifyShelf(`${action} "${item.label}".`);
+            } else {
+                this._notifyShelf(`Could not reveal "${item.label}".`);
+            }
+        } catch (e) {
+            logError(`Failed to reveal shelf item: ${e.message}`);
+            this._notifyShelf(`Could not reveal "${item.label}".`);
+        }
+    }
+
+    _removeShelfRecord(record) {
+        const item = record?.shelfItem;
+        if (!item || !this._isShelfAvailable()) return;
+
+        let removed = false;
+        let message = '';
+
+        if (record.kind === 'shelf-attachment') {
+            const parent = record.parentAppItem;
+            if (parent?.id) {
+                removed = !!this._shelf.removeAttachment(parent.id, item.id);
+                message = `Removed "${item.label}" from ${parent.label || 'app context'}.`;
+            }
+        } else if (record.kind === 'shelf-workspace-attachment') {
+            const workspace = record.parentWorkspaceItem;
+            const context = record.parentWorkspaceContext;
+            if (workspace?.id && context?.id) {
+                removed = !!this._shelf.removeWorkspaceContextAttachment?.(workspace.id, context.id, item.id);
+                message = `Removed "${item.label}" from ${context.label || 'workspace app context'}.`;
+            }
+        } else {
+            const label = item.label || item.value || 'Shelf item';
+            if (item.type === 'workspace') {
+                const profileDeleted = this._deleteWorkspaceProfile(item.profileName || item.value || item.label || '');
+                removed = !!this._shelf.remove(item.id);
+                message = profileDeleted
+                    ? `Deleted workspace context "${label}".`
+                    : `Removed "${label}" from Shelf, but the linked Workspace Profile was not deleted.`;
+            } else {
+                removed = !!this._shelf.remove(item.id);
+                message = `Removed "${label}" from Shelf.`;
+            }
+        }
+
+        if (removed) {
+            this._notifyShelf(message);
+        } else {
+            this._notifyShelf(`Could not remove "${item.label || 'Shelf item'}".`);
+        }
+
+        if (this._isOpen) this._renderResults(this._getSearchText());
+    }
+
+    _touchShelfRecord(record) {
+        if (record?.kind === 'shelf-attachment') {
+            const parent = record.parentAppItem;
+            if (parent?.id) this._shelf?.touch?.(parent.id);
+            return;
+        }
+
+        if (record?.kind === 'shelf-workspace-attachment' || record?.kind === 'shelf-workspace-app') {
+            const parent = record.parentWorkspaceItem;
+            if (parent?.id) this._shelf?.touch?.(parent.id);
+            return;
+        }
+
+        const item = record?.shelfItem;
+        if (item?.id) this._shelf?.touch?.(item.id);
+    }
+
+    _launchApp(record, options = {}) {
         const app = record?.app;
         if (!app) throw new Error('missing Shell app');
 
-        if (typeof app.open_new_window === 'function') {
+        const forceNewWindow = !!options.forceNewWindow;
+        const timestamp = this._getLaunchTimestamp();
+
+        if (forceNewWindow && typeof app.open_new_window === 'function') {
             app.open_new_window(-1);
             log(`Launched ${record.name} via Shell.App.open_new_window`);
             return;
         }
 
+        if (!forceNewWindow && typeof app.activate === 'function') {
+            app.activate();
+            log(`Activated ${record.name} via Shell.App.activate`);
+            return;
+        }
+
+        if (!forceNewWindow && typeof app.activate_full === 'function') {
+            app.activate_full(timestamp, -1);
+            log(`Activated ${record.name} via Shell.App.activate_full`);
+            return;
+        }
+
         const appInfo = app.appInfo ?? app.get_app_info?.();
         if (appInfo && typeof appInfo.launch === 'function') {
-            const timestamp = global.get_current_time?.() ?? 0;
             const context = global.create_app_launch_context?.(timestamp, -1) ?? null;
             appInfo.launch([], context);
             log(`Launched ${record.name} via Gio.AppInfo.launch`);
@@ -2602,6 +7007,28 @@ export default class EssentialMenu {
         }
 
         throw new Error('no supported launch method');
+    }
+
+    _getLaunchTimestamp() {
+        try {
+            const displayTime = global.display?.get_current_time_roundtrip?.();
+            if (Number.isFinite(displayTime) && displayTime >= 0 && displayTime <= 0xffffffff) {
+                return displayTime >>> 0;
+            }
+        } catch (e) {
+            // Fall back below.
+        }
+
+        try {
+            const eventTime = Clutter.get_current_event_time?.();
+            if (Number.isFinite(eventTime) && eventTime >= 0 && eventTime <= 0xffffffff) {
+                return eventTime >>> 0;
+            }
+        } catch (e) {
+            // Fall back below.
+        }
+
+        return 0;
     }
 
     _uninstallAppRecord(record) {
@@ -2613,7 +7040,7 @@ export default class EssentialMenu {
 
             // Resolve absolute import URI relative to the current module's absolute file path to work reliably in GJS ESM
             const currentDir = import.meta.url.substring(0, import.meta.url.lastIndexOf('/'));
-            const importUri = `${currentDir}/appUninstallUtility.js?v=20260530-autoremove-deps`;
+            const importUri = `${currentDir}/appUninstallUtility.js?v=20260603-install-source`;
 
             // Dynamically import uninstallation utility to run uninstallation dialogue
             import(importUri).then(Module => {
@@ -2640,6 +7067,19 @@ export default class EssentialMenu {
         this._searchEntry.clutter_text?.set_text(text);
     }
 
+    _activateSearchMode(prefix) {
+        if (!this._searchEntry) return;
+
+        const text = `${prefix} `;
+        const previousText = this._getSearchText();
+        this._setSearchText(text);
+        this._moveSearchCursorToEnd();
+        this._grabSearchFocus();
+        if (previousText === text) {
+            this._renderResults(text);
+        }
+    }
+
     _getSearchText() {
         if (!this._searchEntry) return '';
 
@@ -2650,36 +7090,42 @@ export default class EssentialMenu {
         return this._searchEntry.clutter_text?.get_text() ?? '';
     }
 
+    _moveSearchCursorToEnd() {
+        try {
+            const textLength = this._getSearchText().length;
+            this._searchEntry.clutter_text?.set_cursor_position(textLength);
+            this._searchEntry.clutter_text?.set_selection_bound(textLength);
+        } catch (e) {
+            // Cursor placement is cosmetic; focus still works without it.
+        }
+    }
+
+    _grabSearchFocus() {
+        try {
+            if (!this._searchEntry) return;
+
+            if (typeof this._searchEntry.grab_key_focus === 'function') {
+                this._searchEntry.grab_key_focus();
+            } else {
+                this._searchEntry.clutter_text?.grab_key_focus();
+            }
+        } catch (e) {
+            // The launcher is still usable by clicking the search field.
+        }
+    }
+
     _scheduleSearchFocus() {
         this._cancelSearchFocus();
 
         // Attempt synchronous grab-focus immediately so the search entry renders
         // in its focused state from the very first frame, preventing any visual style transition flash.
-        try {
-            if (this._searchEntry) {
-                if (typeof this._searchEntry.grab_key_focus === 'function') {
-                    this._searchEntry.grab_key_focus();
-                } else {
-                    this._searchEntry.clutter_text?.grab_key_focus();
-                }
-            }
-        } catch (e) {
-            // Synchronous grab-focus may be deferred, which is handled by the idle fallback.
-        }
+        this._grabSearchFocus();
 
         this._focusIdleId = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
             this._focusIdleId = 0;
             if (!this._isOpen || !this._searchEntry) return GLib.SOURCE_REMOVE;
 
-            try {
-                if (typeof this._searchEntry.grab_key_focus === 'function') {
-                    this._searchEntry.grab_key_focus();
-                } else {
-                    this._searchEntry.clutter_text?.grab_key_focus();
-                }
-            } catch (e) {
-                // The launcher is still usable by clicking the search field.
-            }
+            this._grabSearchFocus();
             return GLib.SOURCE_REMOVE;
         });
     }
@@ -2698,17 +7144,22 @@ export default class EssentialMenu {
             if (!this._isOpen) return Clutter.EVENT_PROPAGATE;
 
             const eventType = event.type();
+            if (this._handleManualShelfDragCapturedEvent(event)) return Clutter.EVENT_STOP;
+
             if (eventType === Clutter.EventType.KEY_PRESS &&
                 event.get_key_symbol() === Clutter.KEY_Escape) {
                 this.close();
                 return Clutter.EVENT_STOP;
             }
 
+            if (this._isInternalShelfDragActive()) return Clutter.EVENT_PROPAGATE;
+
             if (eventType === Clutter.EventType.BUTTON_PRESS ||
                 eventType === Clutter.EventType.TOUCH_BEGIN) {
                 const [x, y] = event.get_coords();
                 if (!this._pointInsideActor(this._launcher, x, y) &&
-                    !this._pointInsideActor(this._indicator, x, y)) {
+                    !this._pointInsideActor(this._indicator, x, y) &&
+                    !this._pointInsideActor(this._floatingDropActor, x, y)) {
                     this.close();
                     return Clutter.EVENT_PROPAGATE;
                 }

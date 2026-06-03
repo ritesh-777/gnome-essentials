@@ -120,6 +120,7 @@ export default class DeepWorkModule {
         this._floatingPomodoroIcon = null;
         this._floatingPomodoroDragHandle = null;
         this._floatingPomodoroPeekIcon = null;
+        this._floatingEssentialMenuButton = null;
         this._floatingPomodoroDragState = null;
         this._floatingPomodoroStageCaptureId = 0;
         this._floatingPomodoroChromeTracked = false;
@@ -212,6 +213,7 @@ export default class DeepWorkModule {
             this._animateFloatingPomodoroRecreation();
         });
         bindKey('deepwork-pomodoro-show-notification-count', () => this._updatePomodoroDisplay());
+        bindKey('tweaks-essential-menu-enabled', () => this._syncFloatingEssentialMenuButton());
 
         this._evaluatePomodoroIndicator();
         this._syncFocusModeFromSettings();
@@ -224,6 +226,7 @@ export default class DeepWorkModule {
     disable() {
         log('Disabling Deep Work module...');
 
+        this._unregisterFloatingEssentialMenuDropActor();
         global.gnome_essentials_deepwork = null;
 
         // 1. Clean up settings listeners
@@ -2332,6 +2335,7 @@ export default class DeepWorkModule {
 
         container.connect('destroy', () => {
             if (this._floatingPomodoroActor === container) {
+                this._unregisterFloatingEssentialMenuDropActor();
                 this._floatingPomodoroActor = null;
                 this._floatingPomodoroLabel = null;
                 this._floatingPomodoroClockSeparator = null;
@@ -2340,6 +2344,7 @@ export default class DeepWorkModule {
                 this._floatingPomodoroIcon = null;
                 this._floatingPomodoroDragHandle = null;
                 this._floatingPomodoroPeekIcon = null;
+                this._floatingEssentialMenuButton = null;
                 this._floatingPomodoroCollapseButton = null;
                 this._floatingPomodoroExpandButton = null;
             }
@@ -2375,6 +2380,21 @@ export default class DeepWorkModule {
         });
         peekButton.set_child(this._floatingPomodoroPeekIcon);
         peekButton.connect('clicked', () => this._togglePanelPeek());
+
+        const essentialMenuButton = new St.Button({
+            style_class: 'pomodoro-floating-essential-menu-button',
+            can_focus: true,
+            track_hover: true,
+            accessible_name: 'Open Essential Menu',
+            x_align: Clutter.ActorAlign.CENTER,
+            y_align: Clutter.ActorAlign.CENTER,
+            visible: !isCollapsed && this._isEssentialMenuEnabled()
+        });
+        essentialMenuButton.set_child(new St.Icon({
+            icon_name: 'view-app-grid-symbolic',
+            style_class: 'system-status-icon pomodoro-floating-icon'
+        }));
+        essentialMenuButton.connect('clicked', () => this._toggleEssentialMenuFromFloating());
 
         const timerButton = new St.Button({
             style_class: 'pomodoro-floating-main-button',
@@ -2558,6 +2578,7 @@ export default class DeepWorkModule {
 
         container.add_child(dragHandle);
         container.add_child(peekButton);
+        container.add_child(essentialMenuButton);
         container.add_child(timerButton);
         container.add_child(rotateButton);
         container.add_child(resetButton);
@@ -2572,6 +2593,8 @@ export default class DeepWorkModule {
 
         this._floatingPomodoroActor = container;
         this._floatingPomodoroDragHandle = dragHandle;
+        this._floatingEssentialMenuButton = essentialMenuButton;
+        this._registerFloatingEssentialMenuDropActor();
         this._floatingPomodoroCollapseButton = collapseButton;
         this._floatingPomodoroExpandButton = expandButton;
         this._updateFloatingPomodoroMiniDotState(false);
@@ -3036,6 +3059,58 @@ export default class DeepWorkModule {
     _setPanelPeekIcon(iconName) {
         if (this._floatingPomodoroPeekIcon) {
             this._floatingPomodoroPeekIcon.icon_name = iconName;
+        }
+    }
+
+    _isEssentialMenuEnabled() {
+        try {
+            return this._settings.get_boolean('tweaks-essential-menu-enabled');
+        } catch (e) {
+            return false;
+        }
+    }
+
+    _syncFloatingEssentialMenuButton() {
+        this._updateFloatingPomodoroMiniDotState(true);
+        if (this._isEssentialMenuEnabled()) {
+            this._registerFloatingEssentialMenuDropActor();
+        } else {
+            this._unregisterFloatingEssentialMenuDropActor();
+        }
+    }
+
+    _registerFloatingEssentialMenuDropActor() {
+        const menu = global.gnome_essentials_menu || null;
+        if (!menu || typeof menu.setFloatingDropActor !== 'function') return;
+
+        if (this._floatingEssentialMenuButton && this._isEssentialMenuEnabled()) {
+            menu.setFloatingDropActor(this._floatingEssentialMenuButton);
+        } else {
+            menu.setFloatingDropActor(null);
+        }
+    }
+
+    _unregisterFloatingEssentialMenuDropActor() {
+        const menu = global.gnome_essentials_menu || null;
+        if (menu && typeof menu.setFloatingDropActor === 'function') {
+            menu.setFloatingDropActor(null);
+        }
+    }
+
+    _toggleEssentialMenuFromFloating() {
+        const menu = global.gnome_essentials_menu || null;
+        if (menu && typeof menu.toggle === 'function') {
+            menu.toggle();
+            this._queueFloatingPomodoroRaise();
+            return;
+        }
+
+        if (this._isEssentialMenuEnabled()) {
+            try {
+                this._settings.set_string('tweaks-essential-menu-trigger', `${Date.now()}-${Math.floor(Math.random() * 100000)}`);
+            } catch (e) {
+                logError(`Failed to trigger Essential Menu from floating panel: ${e.message}`);
+            }
         }
     }
 
@@ -3842,6 +3917,7 @@ export default class DeepWorkModule {
         
         const peekButton = this._floatingPomodoroPeekIcon?.get_parent();
         this._easeActorOpacity(peekButton, !shouldBeDot && !isShortened, 255, animate);
+        this._easeActorOpacity(this._floatingEssentialMenuButton, this._isEssentialMenuEnabled() && !shouldBeDot && !isShortened, 255, animate);
         
         this._easeActorOpacity(this._floatingPomodoroLabel, !shouldBeDot && showTime, 255, animate);
         this._easeActorOpacity(this._floatingPomodoroClockSeparator, !shouldBeDot && showTime && showClock, 255, animate);
@@ -3893,6 +3969,7 @@ export default class DeepWorkModule {
         this._finishFloatingPomodoroDrag();
         this._stopFloatingPomodoroRaiseTimer();
         this._cancelPanelPeek(false);
+        this._unregisterFloatingEssentialMenuDropActor();
         if (this._clockTimerId) {
             GLib.source_remove(this._clockTimerId);
             this._clockTimerId = 0;
@@ -3909,6 +3986,7 @@ export default class DeepWorkModule {
         this._floatingPomodoroIcon = null;
         this._floatingPomodoroDragHandle = null;
         this._floatingPomodoroPeekIcon = null;
+        this._floatingEssentialMenuButton = null;
         this._floatingPomodoroChromeTracked = false;
         this._floatingPomodoroChromePlacement = null;
     }

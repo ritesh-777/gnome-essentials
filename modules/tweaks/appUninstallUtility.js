@@ -15,6 +15,7 @@ import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import * as AppDisplay from 'resource:///org/gnome/shell/ui/appDisplay.js';
 import * as ModalDialog from 'resource:///org/gnome/shell/ui/modalDialog.js';
 import * as CheckBox from 'resource:///org/gnome/shell/ui/checkBox.js';
+import { classifyAppInstallSource, installSourceIconName } from './appInstallSource.js';
 
 const DEBUG = true;
 
@@ -32,6 +33,25 @@ function log(msg) {
  */
 function logError(msg) {
     console.error('[GnomeEssentials][UninstallUtility] ERROR: ' + msg);
+}
+
+function installSourceCapsuleStyle(sourceType = '') {
+    const palette = {
+        flatpak: ['rgba(28, 113, 216, 0.28)', 'rgba(98, 160, 234, 0.52)', '#d7e8ff'],
+        snap: ['rgba(145, 65, 172, 0.28)', 'rgba(192, 97, 203, 0.52)', '#f4d7ff'],
+        webapp: ['rgba(38, 162, 105, 0.24)', 'rgba(87, 227, 137, 0.46)', '#d9ffe8'],
+        local: ['rgba(229, 165, 10, 0.22)', 'rgba(245, 194, 17, 0.46)', '#fff0c2'],
+        native: ['rgba(255, 255, 255, 0.10)', 'rgba(255, 255, 255, 0.18)', 'rgba(255, 255, 255, 0.86)']
+    };
+    const [bg, border, text] = palette[sourceType] || palette.native;
+
+    return [
+        'padding: 2px 8px',
+        'border-radius: 999px',
+        `background-color: ${bg}`,
+        `border: 1px solid ${border}`,
+        `color: ${text}`
+    ].join('; ');
 }
 
 /**
@@ -73,11 +93,16 @@ function createConfirmUninstallDialog(appName, classification, app, onConfirm) {
     });
     textColumn.add_child(titleLabel);
 
-    const typeLabel = new St.Label({
-        text: `Type: ${classification.details}`,
-        style: 'font-size: 10pt; color: #888888;'
+    const sourceBadge = new St.Bin({
+        x_align: Clutter.ActorAlign.START,
+        style: installSourceCapsuleStyle(classification.sourceType)
     });
-    textColumn.add_child(typeLabel);
+    const sourceBadgeLabel = new St.Label({
+        text: classification.sourceLabel || classification.details,
+        style: 'font-size: 9.5pt; font-weight: bold; color: inherit; text-align: center;'
+    });
+    sourceBadge.set_child(sourceBadgeLabel);
+    textColumn.add_child(sourceBadge);
 
     headerBox.add_child(textColumn);
     dialog.contentLayout.add_child(headerBox);
@@ -186,12 +211,43 @@ export default class AppUninstallUtility {
                         // Protect core shell components from accidental deletion
                         if (appId.startsWith('org.gnome.Shell') || appId === 'gnome-shell.desktop') return;
 
+                        const appInfo = app.get_app_info?.();
+                        const classification = self._classifyApp(
+                            appId,
+                            appInfo?.get_filename?.() || '',
+                            appInfo
+                        );
+
                         // Add visual separator
                         this.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
+                        const sourceItem = new PopupMenu.PopupBaseMenuItem({
+                            reactive: false,
+                            can_focus: false
+                        });
+                        sourceItem.add_child(new St.Icon({
+                            icon_name: installSourceIconName(classification.sourceType),
+                            icon_size: 16
+                        }));
+                        sourceItem.add_child(new St.Label({
+                            text: 'Install source',
+                            y_align: Clutter.ActorAlign.CENTER,
+                            style: 'font-size: 10pt; color: rgba(255, 255, 255, 0.72);'
+                        }));
+                        const sourceCapsule = new St.Bin({
+                            y_align: Clutter.ActorAlign.CENTER,
+                            style: installSourceCapsuleStyle(classification.sourceType)
+                        });
+                        sourceCapsule.set_child(new St.Label({
+                            text: classification.sourceLabel || classification.details,
+                            style: 'font-size: 9.5pt; font-weight: bold; color: inherit; text-align: center;'
+                        }));
+                        sourceItem.add_child(sourceCapsule);
+                        this.addMenuItem(sourceItem);
+
                         // Add "Uninstall" menu option
                         const item = new PopupMenu.PopupImageMenuItem(
-                            'Uninstall',
+                            `Uninstall (${classification.sourceLabel || 'App'})`,
                             'user-trash-symbolic'
                         );
                         
@@ -311,48 +367,7 @@ export default class AppUninstallUtility {
      * @returns {Object} Package classification details.
      */
     _classifyApp(appId, desktopPath, appInfo) {
-        // A. Flatpak Sandbox Detection
-        if (desktopPath && (desktopPath.includes('/flatpak/') || desktopPath.includes('/exports/share/applications/'))) {
-            const isUser = desktopPath.includes('/.local/share/flatpak/');
-            return {
-                type: 'flatpak',
-                isUser: isUser,
-                appId: appId.replace(/\.desktop$/, ''),
-                details: isUser ? 'User sandboxed package (Flatpak)' : 'System sandboxed package (Flatpak)'
-            };
-        }
-
-        // B. Snap Sandbox Detection
-        if (desktopPath && (desktopPath.includes('/snapd/') || desktopPath.includes('/snap/'))) {
-            return {
-                type: 'snap',
-                appId: appId.replace(/\.desktop$/, ''),
-                details: 'Snap sandboxed package'
-            };
-        }
-
-        // C. Local Desktop Entries / PWA Detection
-        const userAppsDir = GLib.get_user_data_dir() + '/applications';
-        if (desktopPath && desktopPath.startsWith(userAppsDir)) {
-            const execLine = appInfo.get_commandline() || '';
-            const isPWA = execLine.includes('--app-id=') || execLine.includes('--app=');
-            
-            return {
-                type: 'local',
-                isPWA: isPWA,
-                path: desktopPath,
-                exec: execLine,
-                details: isPWA ? 'Progressive Web App (PWA)' : 'Local application shortcut'
-            };
-        }
-
-        // D. Fallback to System Native Package
-        return {
-            type: 'system',
-            appId: appId,
-            path: desktopPath,
-            details: 'System native package'
-        };
+        return classifyAppInstallSource(appId, desktopPath, appInfo);
     }
 
     /**

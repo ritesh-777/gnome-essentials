@@ -2,7 +2,8 @@
 
 import BatteryHealthSound from './tweaks/batteryHealthSound.js?v=20260529';
 import EssentialMenu from './tweaks/essentialMenu.js?v=20260531-3d-tactile-depth';
-import AppUninstallUtility from './tweaks/appUninstallUtility.js?v=20260530-autoremove-deps';
+import AppUninstallUtility from './tweaks/appUninstallUtility.js?v=20260603-install-source';
+import EssentialShelf from './tweaks/essentialShelf.js?v=20260602-shelf-mvp';
 
 const DEBUG = false;
 
@@ -38,6 +39,8 @@ export default class EssentialTweaksModule {
         this._batteryHealthSoundActive = false;
         this._essentialMenu = null;
         this._essentialMenuActive = false;
+        this._essentialShelf = null;
+        this._essentialShelfActive = false;
         this._appUninstallUtility = null;
         this._appUninstallUtilityActive = false;
         this._settingsHandlers = [];
@@ -52,6 +55,7 @@ export default class EssentialTweaksModule {
 
         this._connectSettings();
         this._syncBatteryHealthSound();
+        this._syncEssentialShelf();
         this._syncEssentialMenu();
         this._syncAppUninstallUtility();
 
@@ -67,6 +71,7 @@ export default class EssentialTweaksModule {
 
         this._disconnectSettings();
         this._disableEssentialMenu();
+        this._disableEssentialShelf();
         this._disableBatteryHealthSound();
         this._disableAppUninstallUtility();
 
@@ -89,6 +94,7 @@ export default class EssentialTweaksModule {
 
         bindKey('tweaks-battery-health-sound-enabled', () => this._syncBatteryHealthSound());
         bindKey('tweaks-essential-menu-enabled', () => this._syncEssentialMenu());
+        bindKey('tweaks-essential-shelf-enabled', () => this._syncEssentialShelf());
         bindKey('tweaks-essential-uninstall-enabled', () => this._syncAppUninstallUtility());
     }
 
@@ -155,6 +161,55 @@ export default class EssentialTweaksModule {
     }
 
     /**
+     * Synchronizes the Essential Shelf storage module based on settings.
+     * @private
+     * @returns {void}
+     */
+    _syncEssentialShelf() {
+        const shouldEnable = this._settings?.get_boolean('tweaks-essential-shelf-enabled') ?? false;
+
+        if (shouldEnable) {
+            if (this._essentialShelfActive) return;
+
+            try {
+                this._essentialShelf = new EssentialShelf(this._settings);
+                this._essentialShelf.enable();
+                this._essentialShelfActive = true;
+                this._essentialMenu?.setShelf?.(this._essentialShelf);
+            } catch (e) {
+                this._essentialShelfActive = false;
+                try {
+                    this._essentialShelf?.disable();
+                } catch (disableError) {
+                    logError('Failed to clean up Essential Shelf: ' + disableError.message);
+                }
+                this._essentialShelf = null;
+                this._essentialMenu?.setShelf?.(null);
+                logError('Failed to enable Essential Shelf: ' + e.message);
+            }
+        } else {
+            this._disableEssentialShelf();
+        }
+    }
+
+    /**
+     * Deactivates and destroys the Essential Shelf storage module.
+     * @private
+     * @returns {void}
+     */
+    _disableEssentialShelf() {
+        try {
+            this._essentialMenu?.setShelf?.(null);
+            this._essentialShelf?.disable();
+        } catch (e) {
+            logError('Failed to disable Essential Shelf: ' + e.message);
+        }
+
+        this._essentialShelf = null;
+        this._essentialShelfActive = false;
+    }
+
+    /**
      * Synchronizes and toggles the Essential Menu quick launcher overlay based on settings.
      * @private
      * @returns {void}
@@ -166,7 +221,10 @@ export default class EssentialTweaksModule {
             if (this._essentialMenuActive) return;
 
             try {
-                this._essentialMenu = new EssentialMenu(this._settings);
+                this._essentialMenu = new EssentialMenu(
+                    this._settings,
+                    this._essentialShelfActive ? this._essentialShelf : null
+                );
                 this._essentialMenu.enable();
                 this._essentialMenuActive = true;
             } catch (e) {

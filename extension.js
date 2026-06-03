@@ -64,6 +64,9 @@ export default class GnomeEssentialsExtension extends Extension {
         this._tweaksMenuSettingsChangedId = this._settings.connect('changed::tweaks-essential-menu-enabled', () => {
             this._requestModuleStateEvaluation();
         });
+        this._tweaksShelfSettingsChangedId = this._settings.connect('changed::tweaks-essential-shelf-enabled', () => {
+            this._requestModuleStateEvaluation();
+        });
         this._tweaksUninstallSettingsChangedId = this._settings.connect('changed::tweaks-essential-uninstall-enabled', () => {
             this._requestModuleStateEvaluation();
         });
@@ -104,6 +107,10 @@ export default class GnomeEssentialsExtension extends Extension {
         if (this._tweaksMenuSettingsChangedId > 0) {
             this._settings.disconnect(this._tweaksMenuSettingsChangedId);
             this._tweaksMenuSettingsChangedId = 0;
+        }
+        if (this._tweaksShelfSettingsChangedId > 0) {
+            this._settings.disconnect(this._tweaksShelfSettingsChangedId);
+            this._tweaksShelfSettingsChangedId = 0;
         }
         if (this._tweaksUninstallSettingsChangedId > 0) {
             this._settings.disconnect(this._tweaksUninstallSettingsChangedId);
@@ -156,6 +163,7 @@ export default class GnomeEssentialsExtension extends Extension {
         const tweaksEnabled =
             this._settings.get_boolean('tweaks-battery-health-sound-enabled') ||
             this._settings.get_boolean('tweaks-essential-menu-enabled') ||
+            this._settings.get_boolean('tweaks-essential-shelf-enabled') ||
             this._settings.get_boolean('tweaks-essential-uninstall-enabled');
         const deepWorkPresent =
             this._activeModules.has('deepwork') ||
@@ -245,6 +253,7 @@ export default class GnomeEssentialsExtension extends Extension {
             const tweaksEnabled =
                 this._settings.get_boolean('tweaks-battery-health-sound-enabled') ||
                 this._settings.get_boolean('tweaks-essential-menu-enabled') ||
+                this._settings.get_boolean('tweaks-essential-shelf-enabled') ||
                 this._settings.get_boolean('tweaks-essential-uninstall-enabled');
 
             // --- Flagship Module: Deep Work ---

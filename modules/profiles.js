@@ -19,6 +19,8 @@ import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 const DEBUG = true;
 const MAX_GEOMETRY_VALUE = 100000;
 const MAX_TILE_RATIO = 1000;
+const SAFETY_SNAPSHOT_DEBOUNCE_MS = 1200;
+const SAFETY_SNAPSHOT_INITIAL_DELAY_MS = 1000;
 
 function log(msg) {
     if (DEBUG) console.log('[GnomeEssentials][Profiles] ' + msg);
@@ -331,17 +333,27 @@ export default class ProfilesModule {
         // Signal IDs
         this._windowCreatedId = 0;
         this._settingsChangedId = 0;
+        this._monitorsChangedId = 0;
+        this._screenShieldSignalId = 0;
+        this._loginManagerProxy = null;
+        this._prepareForSleepSignalId = 0;
         
         // App Restoration Queue
         this._pendingRestorations = [];
         this._recentlyMappedWindows = [];
         this._settleTimerId = 0;
         this._menuRebuildTimerId = 0;
+        this._rollingSnapshotTimerId = 0;
         this._launchTimerIds = [];
         this._paperWMSlurpTimerIds = [];
         this._paperWMReconcileTimerId = 0;
         this._paperWMReconcileAttempts = 0;
         this._paperWMRestoreConfigs = [];
+        this._rollingSafetySnapshot = null;
+        this._trackedWindowSignals = new Map();
+        this._contextLaunchOverrides = null;
+        this._contextLaunchOverrideClearId = 0;
+        this._pendingScanTimerIds = [];
     }
 
     /**
@@ -381,6 +393,8 @@ export default class ProfilesModule {
             }
         });
 
+        global.gnome_essentials_profiles = this;
+
         log('Workspace Session Restorer enabled successfully.');
     }
 
@@ -392,6 +406,10 @@ export default class ProfilesModule {
     disable() {
         log('Disabling Workspace Session Restorer...');
         this._active = false;
+
+        if (global.gnome_essentials_profiles === this) {
+            global.gnome_essentials_profiles = null;
+        }
 
         // 1. Disconnect all signal handlers
         this._disconnectSignals();
@@ -426,7 +444,9 @@ export default class ProfilesModule {
         }
         this._clearLaunchTimers();
         this._clearPaperWMSlurpTimers();
+        this._clearPendingScanTimers();
         this._clearPaperWMReconcileTimer();
+        this._clearContextLaunchOverrides();
         this._paperWMRestoreConfigs = [];
         this._recentlyMappedWindows = [];
 
@@ -436,6 +456,8 @@ export default class ProfilesModule {
     _connectSignals() {
         this._windowCreatedId = global.display.connect('window-created', (display, win) => {
             if (!this._active || !win) return;
+            this._trackWindowForSafetySnapshot(win);
+            this._scheduleRollingSnapshotRefresh();
 
             // Wait briefly for window mapping and application metadata association
             GLib.timeout_add(GLib.PRIORITY_DEFAULT, 350, () => {
@@ -445,12 +467,340 @@ export default class ProfilesModule {
                 return GLib.SOURCE_REMOVE;
             });
         });
+
+        this._trackExistingWindowsForSafetySnapshot();
+        this._scheduleRollingSnapshotRefresh(SAFETY_SNAPSHOT_INITIAL_DELAY_MS);
+
+        if (Main.layoutManager) {
+            this._monitorsChangedId = Main.layoutManager.connect('monitors-changed', () => {
+                this._saveSafetySnapshotFromRollingCache('before-monitor-change');
+                this._scheduleRollingSnapshotRefresh(SAFETY_SNAPSHOT_INITIAL_DELAY_MS);
+            });
+        }
+
+        if (Main.screenShield) {
+            this._screenShieldSignalId = Main.screenShield.connect('locked-changed', () => {
+                if (Main.screenShield.locked) {
+                    this._saveSafetySnapshot('before-screen-lock');
+                } else {
+                    this._scheduleRollingSnapshotRefresh(SAFETY_SNAPSHOT_INITIAL_DELAY_MS);
+                }
+            });
+        }
+
+        this._connectLoginManagerSleepSignal();
     }
 
     _disconnectSignals() {
         if (this._windowCreatedId > 0) {
             global.display.disconnect(this._windowCreatedId);
             this._windowCreatedId = 0;
+        }
+        if (Main.layoutManager && this._monitorsChangedId > 0) {
+            Main.layoutManager.disconnect(this._monitorsChangedId);
+            this._monitorsChangedId = 0;
+        }
+        if (Main.screenShield && this._screenShieldSignalId > 0) {
+            Main.screenShield.disconnect(this._screenShieldSignalId);
+            this._screenShieldSignalId = 0;
+        }
+        this._disconnectLoginManagerSleepSignal();
+        this._disconnectTrackedWindowSignals();
+        if (this._rollingSnapshotTimerId > 0) {
+            GLib.source_remove(this._rollingSnapshotTimerId);
+            this._rollingSnapshotTimerId = 0;
+        }
+    }
+
+    _connectLoginManagerSleepSignal() {
+        try {
+            this._loginManagerProxy = new Gio.DBusProxy({
+                g_connection: Gio.DBus.system,
+                g_name: 'org.freedesktop.login1',
+                g_object_path: '/org/freedesktop/login1',
+                g_interface_name: 'org.freedesktop.login1.Manager'
+            });
+
+            this._loginManagerProxy.init_async(GLib.PRIORITY_DEFAULT, null, (proxy, result) => {
+                try {
+                    proxy.init_finish(result);
+                    if (!this._active || proxy !== this._loginManagerProxy) return;
+
+                    this._prepareForSleepSignalId = proxy.connectSignal('PrepareForSleep', (_proxy, _sender, params) => {
+                        const unpacked = params?.deepUnpack?.() || [];
+                        const preparingForSleep = !!unpacked[0];
+                        if (preparingForSleep) {
+                            this._saveSafetySnapshot('before-suspend');
+                        } else {
+                            this._scheduleRollingSnapshotRefresh(SAFETY_SNAPSHOT_INITIAL_DELAY_MS);
+                        }
+                    });
+                } catch (e) {
+                    log(`Could not subscribe to login manager sleep signal: ${e.message}`);
+                }
+            });
+        } catch (e) {
+            log(`Login manager sleep signal unavailable: ${e.message}`);
+            this._loginManagerProxy = null;
+        }
+    }
+
+    _disconnectLoginManagerSleepSignal() {
+        if (this._loginManagerProxy && this._prepareForSleepSignalId > 0) {
+            try {
+                this._loginManagerProxy.disconnectSignal(this._prepareForSleepSignalId);
+            } catch (e) {
+                // Ignore disconnect differences across GJS versions.
+            }
+        }
+        this._prepareForSleepSignalId = 0;
+        this._loginManagerProxy = null;
+    }
+
+    _trackExistingWindowsForSafetySnapshot() {
+        try {
+            for (const actor of global.get_window_actors()) {
+                const win = actor.get_meta_window();
+                this._trackWindowForSafetySnapshot(win);
+            }
+        } catch (e) {
+            log(`Failed to track existing windows for safety snapshots: ${e.message}`);
+        }
+    }
+
+    _trackWindowForSafetySnapshot(win) {
+        try {
+            if (!win || win.get_window_type() !== Meta.WindowType.NORMAL) return;
+            if (this._trackedWindowSignals.has(win)) return;
+
+            const signalIds = [];
+            const connectSignal = (signalName, handler) => {
+                try {
+                    const id = win.connect(signalName, handler);
+                    signalIds.push(id);
+                } catch (e) {
+                    // Not every Meta.Window signal exists on every Shell version.
+                }
+            };
+
+            const scheduleRefresh = () => this._scheduleRollingSnapshotRefresh();
+            connectSignal('position-changed', scheduleRefresh);
+            connectSignal('size-changed', scheduleRefresh);
+            connectSignal('workspace-changed', scheduleRefresh);
+            connectSignal('monitor-changed', scheduleRefresh);
+            connectSignal('notify::minimized', scheduleRefresh);
+            connectSignal('unmanaged', () => {
+                this._scheduleRollingSnapshotRefresh();
+                this._untrackWindowForSafetySnapshot(win);
+            });
+
+            if (signalIds.length > 0) {
+                this._trackedWindowSignals.set(win, signalIds);
+            }
+        } catch (e) {
+            log(`Failed to track window for safety snapshots: ${e.message}`);
+        }
+    }
+
+    _untrackWindowForSafetySnapshot(win) {
+        const signalIds = this._trackedWindowSignals.get(win);
+        if (!signalIds) return;
+
+        for (const id of signalIds) {
+            try {
+                win.disconnect(id);
+            } catch (e) {
+                // The window may already be unmanaged/finalized.
+            }
+        }
+        this._trackedWindowSignals.delete(win);
+    }
+
+    _disconnectTrackedWindowSignals() {
+        for (const [win, signalIds] of this._trackedWindowSignals.entries()) {
+            for (const id of signalIds) {
+                try {
+                    win.disconnect(id);
+                } catch (e) {
+                    // The window may already be unmanaged/finalized.
+                }
+            }
+        }
+        this._trackedWindowSignals.clear();
+    }
+
+    _scheduleRollingSnapshotRefresh(delayMs = SAFETY_SNAPSHOT_DEBOUNCE_MS) {
+        if (!this._active) return;
+
+        if (this._rollingSnapshotTimerId > 0) {
+            GLib.source_remove(this._rollingSnapshotTimerId);
+            this._rollingSnapshotTimerId = 0;
+        }
+
+        this._rollingSnapshotTimerId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, delayMs, () => {
+            this._rollingSnapshotTimerId = 0;
+            this._refreshRollingSafetySnapshot();
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    _refreshRollingSafetySnapshot() {
+        if (!this._active) return;
+
+        try {
+            this._trackExistingWindowsForSafetySnapshot();
+            const windows = this._captureCurrentLayoutWindows();
+            if (!windows.length) return;
+
+            this._rollingSafetySnapshot = {
+                created_at: new Date().toISOString(),
+                reason: 'rolling-cache',
+                monitor_signature: this._getMonitorSignature(),
+                windows
+            };
+            log(`Updated rolling safety snapshot cache with ${windows.length} windows`);
+        } catch (e) {
+            log(`Failed to refresh rolling safety snapshot: ${e.message}`);
+        }
+    }
+
+    _getMonitorSignature() {
+        try {
+            const monitors = Main.layoutManager?.monitors || [];
+            return monitors.map((monitor, index) => [
+                monitor.index ?? index,
+                monitor.x ?? 0,
+                monitor.y ?? 0,
+                monitor.width ?? 0,
+                monitor.height ?? 0
+            ].join(':')).join('|');
+        } catch (e) {
+            return '';
+        }
+    }
+
+    _saveSafetySnapshotFromRollingCache(reason) {
+        if (this._rollingSafetySnapshot?.windows?.length) {
+            return this._saveSafetySnapshot(reason, {
+                windows: this._rollingSafetySnapshot.windows,
+                createdAt: this._rollingSafetySnapshot.created_at,
+                monitorSignature: this._rollingSafetySnapshot.monitor_signature,
+                source: 'rolling-cache'
+            });
+        }
+
+        return this._saveSafetySnapshot(reason, { source: 'fallback-capture' });
+    }
+
+    _saveSafetySnapshot(reason, options = {}) {
+        if (!this._active) return false;
+
+        try {
+            const windows = Array.isArray(options.windows)
+                ? this._cloneWindows(options.windows)
+                : this._captureCurrentLayoutWindows();
+
+            if (!windows.length) {
+                log(`Skipped safety snapshot (${reason}); no restorable windows found`);
+                return false;
+            }
+
+            const data = this._readProfilesData();
+            data.safety_snapshot = {
+                reason,
+                source: options.source || 'capture',
+                created_at: options.createdAt || new Date().toISOString(),
+                monitor_signature: options.monitorSignature || this._getMonitorSignature(),
+                windows
+            };
+            this._writeProfilesData(data);
+            try {
+                Gio.Settings.sync();
+            } catch (e) {
+                // Best effort: regular GSettings writes still work if sync is unavailable.
+            }
+            log(`Saved safety snapshot (${reason}) with ${windows.length} windows`);
+            return true;
+        } catch (e) {
+            logError(`Failed to save safety snapshot (${reason}): ${e.message}`);
+            return false;
+        }
+    }
+
+    _normalizeSafetySnapshot(snapshot) {
+        if (!snapshot || typeof snapshot !== 'object' || !Array.isArray(snapshot.windows)) return null;
+
+        const windows = this._cloneWindows(snapshot.windows);
+        if (!windows.length) return null;
+
+        return {
+            reason: snapshot.reason || 'unknown',
+            source: snapshot.source || 'capture',
+            created_at: snapshot.created_at || null,
+            monitor_signature: snapshot.monitor_signature || '',
+            windows
+        };
+    }
+
+    _getSafetySnapshot(data = null) {
+        const normalized = this._normalizeProfilesData(data || this._readProfilesData());
+        return this._normalizeSafetySnapshot(normalized.safety_snapshot);
+    }
+
+    _formatSafetySnapshotReason(reason) {
+        switch (reason) {
+            case 'before-profile-restore':
+                return 'profile restore';
+            case 'before-monitor-change':
+                return 'monitor change';
+            case 'before-screen-lock':
+                return 'screen lock';
+            case 'before-suspend':
+                return 'suspend';
+            case 'before-safety-restore':
+                return 'previous-layout restore';
+            default:
+                return 'desktop change';
+        }
+    }
+
+    _formatSafetySnapshotTime(createdAt) {
+        if (!createdAt) return '';
+        try {
+            return new Date(createdAt).toLocaleTimeString([], {
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit'
+            });
+        } catch (e) {
+            return '';
+        }
+    }
+
+    restoreSafetySnapshot() {
+        if (!this._active) return;
+
+        try {
+            const snapshot = this._getSafetySnapshot();
+            if (!snapshot) {
+                this._notify('No previous layout snapshot is available yet.');
+                return;
+            }
+
+            const windows = this._cloneWindows(snapshot.windows);
+            this._saveSafetySnapshot('before-safety-restore');
+            this._applyWindowConfigs('Previous Layout', windows, {
+                setActiveProfile: false,
+                operation: 'restore-safety-snapshot',
+                successMessage: 'Restored previous layout.',
+                statusProfile: 'Previous Layout'
+            });
+        } catch (e) {
+            const message = `Failed to restore previous layout: ${e.message}`;
+            logError(message);
+            this._emitProfileOperation('error', 'restore-safety-snapshot', message, {
+                name: 'Previous Layout'
+            });
         }
     }
 
@@ -512,6 +862,7 @@ export default class ProfilesModule {
         try {
             const data = this._readProfilesData();
             const profileNames = Object.keys(data.profiles);
+            const safetySnapshot = this._getSafetySnapshot(data);
 
             if (profileNames.length === 0) {
                 const emptyItem = new PopupMenu.PopupMenuItem('No profiles saved yet', { reactive: false });
@@ -531,6 +882,22 @@ export default class ProfilesModule {
                         `${count} ${windowWord}`
                     ));
                 }
+            }
+
+            if (safetySnapshot) {
+                const reason = this._formatSafetySnapshotReason(safetySnapshot.reason);
+                const time = this._formatSafetySnapshotTime(safetySnapshot.created_at);
+                const detail = time ? `saved before ${reason} at ${time}` : `saved before ${reason}`;
+                const restoreItem = new PopupMenu.PopupImageMenuItem(
+                    `Restore Previous Layout (${detail})`,
+                    'edit-undo-symbolic'
+                );
+                restoreItem.connect('activate', () => {
+                    this._profilesButton?.menu?.close?.();
+                    this.restoreSafetySnapshot();
+                });
+                this._profilesMenuSection.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+                this._profilesMenuSection.addMenuItem(restoreItem);
             }
 
             // Separator
@@ -828,7 +1195,7 @@ export default class ProfilesModule {
             return this._normalizeProfilesData(JSON.parse(dataStr));
         } catch (e) {
             logError('Failed to parse profiles-saved-data: ' + e.message);
-            return { version: 2, profiles: {} };
+            return { version: 2, profiles: {}, safety_snapshot: null };
         }
     }
 
@@ -837,12 +1204,12 @@ export default class ProfilesModule {
     }
 
     _normalizeProfilesData(data) {
-        const normalized = { version: 2, profiles: {} };
+        const normalized = { version: 2, profiles: {}, safety_snapshot: null };
         if (!data || typeof data !== 'object') return normalized;
 
         const source = data.version === 2 && data.profiles ? data.profiles : data;
         for (const [name, entry] of Object.entries(source)) {
-            if (!name || name === 'version' || name === 'profiles') continue;
+            if (!name || name === 'version' || name === 'profiles' || name === 'safety_snapshot') continue;
 
             if (Array.isArray(entry)) {
                 normalized.profiles[name] = {
@@ -861,6 +1228,7 @@ export default class ProfilesModule {
             }
         }
 
+        normalized.safety_snapshot = this._normalizeSafetySnapshot(data.safety_snapshot);
         return normalized;
     }
 
@@ -1754,6 +2122,20 @@ export default class ProfilesModule {
             }
         }
 
+        const contextScore = this._scoreContextCandidate(config, candidateConfig);
+        const contextMatchRequired = !!config?._context_match_required &&
+            Array.isArray(config?._context_match_terms) &&
+            config._context_match_terms.length > 0;
+        if (contextMatchRequired &&
+            this._appsShareContextFamily(config, candidateConfig) &&
+            contextScore <= 0) {
+            return -Infinity;
+        }
+
+        if (contextScore > 0) {
+            score += contextScore;
+        }
+
         if (score <= 0) return -Infinity;
 
         // Autostarted window launch order matching (highest priority for newly launched apps)
@@ -1807,6 +2189,73 @@ export default class ProfilesModule {
         score += Math.max(0, 800 - Math.floor(distance / 2));
 
         return score;
+    }
+
+    _scoreContextCandidate(config, candidateConfig) {
+        const terms = Array.isArray(config?._context_match_terms)
+            ? config._context_match_terms
+            : [];
+        if (terms.length === 0 || !candidateConfig?.title) return 0;
+
+        const title = this._normalizeContextMatchText(candidateConfig.title);
+        if (!title) return 0;
+
+        let best = 0;
+        for (const term of terms) {
+            const normalizedTerm = this._normalizeContextMatchText(term);
+            if (normalizedTerm.length < 3) continue;
+
+            if (title === normalizedTerm) {
+                best = Math.max(best, 9000);
+            } else if (title.includes(normalizedTerm)) {
+                best = Math.max(best, 7200);
+            }
+        }
+
+        if (best <= 0) return 0;
+
+        if (this._appsShareContextFamily(config, candidateConfig)) {
+            best += 1500;
+        }
+
+        return best;
+    }
+
+    _appsShareContextFamily(config, candidateConfig) {
+        const configFamily = this._contextAppFamily(config?.app_id || config?.wm_class);
+        const candidateFamily = this._contextAppFamily(candidateConfig?.app_id || candidateConfig?.wm_class);
+        return !!configFamily && !!candidateFamily && configFamily === candidateFamily;
+    }
+
+    _contextAppFamily(value) {
+        const text = String(value ?? '').toLowerCase();
+        if (!text) return '';
+
+        if (text.includes('libreoffice') || text.includes('openoffice')) return 'office';
+        if (text.includes('onlyoffice') || text.includes('wps')) return 'office';
+        if (text.includes('papers') || text.includes('evince') || text.includes('okular') || text.includes('zotero')) return 'pdf';
+        if (text.includes('nautilus') || text.includes('files') || text.includes('nemo') || text.includes('thunar')) return 'files';
+        if (text.includes('chrome') || text.includes('chromium') || text.includes('firefox') || text.includes('browser')) return 'browser';
+
+        return text.replace(/\.desktop$/i, '').replace(/[^a-z0-9]+/g, '-');
+    }
+
+    _normalizeContextMatchText(value) {
+        let text = String(value ?? '').trim();
+        if (!text) return '';
+
+        try {
+            text = decodeURIComponent(text);
+        } catch (e) {
+            // Keep original text if it is not URI-encoded.
+        }
+
+        return text
+            .toLowerCase()
+            .replace(/^file:\/+/i, '')
+            .replace(/[._-]+/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
     }
 
     _findOptimalMatches(configs, candidates) {
@@ -2066,16 +2515,22 @@ export default class ProfilesModule {
             }
 
             const matchedConfigs = [];
+            const missingConfigs = [];
             for (const config of configs) {
                 if (!this._isLiveNormalWindow(config._matched_window)) {
-                    return {
-                        done: false,
-                        reason: 'waiting for matched windows',
-                        matched: matchedConfigs.length,
-                        total
-                    };
+                    missingConfigs.push(config);
+                    continue;
                 }
                 matchedConfigs.push(config);
+            }
+
+            if (missingConfigs.length > 0) {
+                return {
+                    done: false,
+                    reason: `waiting for matched windows (${missingConfigs.length} missing)`,
+                    matched: matchedConfigs.length,
+                    total
+                };
             }
 
             const groups = new Map();
@@ -2706,6 +3161,10 @@ export default class ProfilesModule {
         this._ensureWorkspaceExists(config.workspace);
 
         try {
+            if (this._launchAppForContextOverride(app, config)) {
+                return;
+            }
+
             if (typeof app.open_new_window === 'function') {
                 app.open_new_window(config.workspace ?? -1);
             } else {
@@ -2719,6 +3178,214 @@ export default class ProfilesModule {
                 logError(`Fallback launch failed for ${config.app_id}: ${fallbackError.message}`);
             }
         }
+    }
+
+    setContextLaunchOverrides(profileName, contexts) {
+        this._clearContextLaunchOverrides();
+
+        const byAppId = new Map();
+        for (const context of Array.isArray(contexts) ? contexts : []) {
+            const appId = this._normalizeAppIdForContext(context?.appId || context?.value);
+            const attachments = Array.isArray(context?.attachments)
+                ? context.attachments
+                    .map(attachment => ({ ...attachment }))
+                    .filter(attachment => attachment.type === 'file' || attachment.type === 'folder' || attachment.type === 'url')
+                : [];
+            if (!appId || attachments.length === 0) continue;
+
+            byAppId.set(appId, {
+                label: context.label || appId,
+                attachments
+            });
+        }
+
+        if (byAppId.size === 0) return false;
+
+        this._contextLaunchOverrides = {
+            profileName,
+            byAppId
+        };
+        this._contextLaunchOverrideClearId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 20000, () => {
+            this._clearContextLaunchOverrides();
+            return GLib.SOURCE_REMOVE;
+        });
+        return true;
+    }
+
+    _primeContextLaunchMatching(profileName, configs) {
+        if (!Array.isArray(configs)) return;
+
+        const overrides = this._contextLaunchOverrides;
+        const offsets = new Map();
+
+        for (const config of configs) {
+            delete config._context_match_attachment;
+            delete config._context_match_attachment_key;
+            delete config._context_match_required;
+            delete config._context_match_terms;
+
+            if (!overrides || !config?.app_id) continue;
+            if (overrides.profileName && profileName && overrides.profileName !== profileName) continue;
+            if (overrides.profileName &&
+                config._restore_profile_name &&
+                overrides.profileName !== config._restore_profile_name) {
+                continue;
+            }
+
+            const appId = this._normalizeAppIdForContext(config.app_id);
+            const bucket = overrides.byAppId?.get(appId);
+            if (!bucket || !Array.isArray(bucket.attachments) || bucket.attachments.length === 0) continue;
+
+            const offset = offsets.get(appId) || 0;
+            const attachment = bucket.attachments[offset] || null;
+            if (!attachment) continue;
+
+            const terms = this._contextTermsFromAttachment(attachment);
+            if (terms.length === 0) continue;
+
+            config._context_match_attachment = { ...attachment };
+            config._context_match_attachment_key = this._contextAttachmentKey(attachment);
+            config._context_match_required = true;
+            config._context_match_terms = terms;
+            offsets.set(appId, offset + 1);
+        }
+    }
+
+    _clearContextLaunchOverrides() {
+        if (this._contextLaunchOverrideClearId > 0) {
+            try {
+                GLib.source_remove(this._contextLaunchOverrideClearId);
+            } catch (e) {
+                // Timer may already have fired.
+            }
+            this._contextLaunchOverrideClearId = 0;
+        }
+        this._contextLaunchOverrides = null;
+    }
+
+    _launchAppForContextOverride(app, config) {
+        const attachment = this._takeContextLaunchAttachment(config);
+        if (!attachment) return false;
+        this._annotateContextLaunchConfig(config, attachment);
+
+        try {
+            const appInfo = app?.get_app_info?.() || app?.appInfo || null;
+            if (!appInfo) return false;
+
+            const timestamp = global.get_current_time?.() ?? 0;
+            const context = global.create_app_launch_context?.(timestamp, config.workspace ?? -1) ?? null;
+
+            if (attachment.type === 'url') {
+                const uri = String(attachment.value || attachment.uri || '').trim();
+                if (uri && typeof appInfo.launch_uris === 'function') {
+                    appInfo.launch_uris([uri], context);
+                    log(`Context-launched ${config.app_id} with URL ${uri}`);
+                    return true;
+                }
+                return false;
+            }
+
+            const file = this._fileFromContextAttachment(attachment);
+            if (!file) return false;
+
+            appInfo.launch([file], context);
+            log(`Context-launched ${config.app_id} with ${attachment.type} ${attachment.path || attachment.uri || attachment.value}`);
+            return true;
+        } catch (e) {
+            logError(`Context launch failed for ${config.app_id}: ${e.message}`);
+            return false;
+        }
+    }
+
+    _takeContextLaunchAttachment(config) {
+        const overrides = this._contextLaunchOverrides;
+        if (!overrides || !config?.app_id) return null;
+        if (overrides.profileName && config._restore_profile_name && overrides.profileName !== config._restore_profile_name) {
+            return null;
+        }
+
+        const appId = this._normalizeAppIdForContext(config.app_id);
+        const bucket = overrides.byAppId?.get(appId);
+        if (!bucket || !Array.isArray(bucket.attachments) || bucket.attachments.length === 0) return null;
+
+        if (config._context_match_attachment_key) {
+            const index = bucket.attachments.findIndex(attachment =>
+                this._contextAttachmentKey(attachment) === config._context_match_attachment_key);
+            if (index >= 0) {
+                return bucket.attachments.splice(index, 1)[0];
+            }
+        }
+
+        return bucket.attachments.shift();
+    }
+
+    _contextAttachmentKey(attachment) {
+        const type = String(attachment?.type || '').trim().toLowerCase();
+        const value = String(attachment?.uri || attachment?.path || attachment?.value || '').trim();
+        return `${type}:${value}`;
+    }
+
+    _fileFromContextAttachment(attachment) {
+        try {
+            if (attachment?.uri) return Gio.File.new_for_uri(attachment.uri);
+            if (attachment?.path) return Gio.File.new_for_path(attachment.path);
+            if (attachment?.value?.startsWith?.('file://')) return Gio.File.new_for_uri(attachment.value);
+            if (GLib.path_is_absolute(attachment?.value || '')) return Gio.File.new_for_path(attachment.value);
+        } catch (e) {
+            logError(`Could not resolve context launch attachment: ${e.message}`);
+        }
+
+        return null;
+    }
+
+    _annotateContextLaunchConfig(config, attachment) {
+        if (!config || !attachment) return;
+
+        config._context_launch_attachment = { ...attachment };
+        config._context_match_terms = this._contextTermsFromAttachment(attachment);
+    }
+
+    _contextTermsFromAttachment(attachment) {
+        const terms = [];
+        const addTerm = value => {
+            const text = String(value ?? '').trim();
+            if (!text) return;
+            if (!terms.includes(text)) terms.push(text);
+        };
+
+        addTerm(attachment?.label);
+        addTerm(this._basenameFromContextValue(attachment?.path));
+        addTerm(this._basenameFromContextValue(attachment?.uri));
+        addTerm(this._basenameFromContextValue(attachment?.value));
+
+        const basename = terms.find(term => term && term.includes('.')) || '';
+        const dot = basename.lastIndexOf('.');
+        if (dot > 0) {
+            addTerm(basename.slice(0, dot));
+        }
+
+        return terms;
+    }
+
+    _basenameFromContextValue(value) {
+        let text = String(value ?? '').trim();
+        if (!text) return '';
+
+        try {
+            text = decodeURIComponent(text);
+        } catch (e) {
+            // Keep original text if it is not URI-encoded.
+        }
+
+        text = text.split(/[?#]/)[0].replace(/^file:\/+/i, '/');
+        const parts = text.split(/[\\/]/).filter(Boolean);
+        return parts.length > 0 ? parts[parts.length - 1] : text;
+    }
+
+    _normalizeAppIdForContext(appId) {
+        const value = String(appId ?? '').trim().toLowerCase();
+        if (!value) return '';
+        return value.endsWith('.desktop') ? value : `${value}.desktop`;
     }
 
     _clearLaunchTimers() {
@@ -2769,6 +3436,47 @@ export default class ProfilesModule {
     // ==========================================
     // Layout Capture and Storage Logic
     // ==========================================
+    _captureCurrentLayoutWindows() {
+        const workspaceManager = global.workspace_manager;
+        const numWorkspaces = workspaceManager.get_n_workspaces();
+        const savedWindows = [];
+        const seenStableSequences = new Set();
+
+        const focusedWindow = global.display.get_focus_window();
+        const actors = global.get_window_actors();
+        const stackMap = new Map();
+        actors.forEach((a, idx) => {
+            const w = a.get_meta_window();
+            if (w) stackMap.set(w, idx);
+        });
+
+        for (let i = 0; i < numWorkspaces; i++) {
+            const ws = workspaceManager.get_workspace_by_index(i);
+            const windows = ws.list_windows();
+
+            for (const win of windows) {
+                // Save normal user applications only
+                if (!win || win.get_window_type() !== Meta.WindowType.NORMAL) continue;
+                if (win.minimized) continue;
+
+                const stableSequence = this._getStableSequence(win);
+                if (stableSequence !== null && stableSequence !== undefined) {
+                    if (seenStableSequences.has(stableSequence)) continue;
+                    seenStableSequences.add(stableSequence);
+                }
+
+                savedWindows.push(this._createWindowConfig(win, null, stackMap.get(win) ?? 0, win === focusedWindow));
+            }
+        }
+
+        // Sort captured windows in exact physical tiling order so they are saved sequentially
+        savedWindows.sort((a, b) => this._compareWindowsForTiling(a, b));
+
+        this._addIdentityIndexes(savedWindows);
+        this._addCreationIndexes(savedWindows);
+        return savedWindows;
+    }
+
     saveCurrentLayout(profileName, options = {}) {
         if (!profileName) {
             const result = { ok: false, message: 'Profile name cannot be empty.' };
@@ -2777,45 +3485,8 @@ export default class ProfilesModule {
         }
 
         try {
-            const workspaceManager = global.workspace_manager;
-            const numWorkspaces = workspaceManager.get_n_workspaces();
             const now = new Date().toISOString();
-             
-            const savedWindows = [];
-            const seenStableSequences = new Set();
-
-            const focusedWindow = global.display.get_focus_window();
-            const actors = global.get_window_actors();
-            const stackMap = new Map();
-            actors.forEach((a, idx) => {
-                const w = a.get_meta_window();
-                if (w) stackMap.set(w, idx);
-            });
-
-            for (let i = 0; i < numWorkspaces; i++) {
-                const ws = workspaceManager.get_workspace_by_index(i);
-                const windows = ws.list_windows();
-
-                for (const win of windows) {
-                    // Save normal user applications only
-                    if (!win || win.get_window_type() !== Meta.WindowType.NORMAL) continue;
-                    if (win.minimized) continue;
-
-                    const stableSequence = this._getStableSequence(win);
-                    if (stableSequence !== null && stableSequence !== undefined) {
-                        if (seenStableSequences.has(stableSequence)) continue;
-                        seenStableSequences.add(stableSequence);
-                    }
-
-                    savedWindows.push(this._createWindowConfig(win, null, stackMap.get(win) ?? 0, win === focusedWindow));
-                }
-            }
-
-            // Sort captured windows in exact physical tiling order so they are saved sequentially
-            savedWindows.sort((a, b) => this._compareWindowsForTiling(a, b));
-
-            this._addIdentityIndexes(savedWindows);
-            this._addCreationIndexes(savedWindows);
+            const savedWindows = this._captureCurrentLayoutWindows();
 
             const data = this._readProfilesData();
             const existing = data.profiles[profileName];
@@ -2852,6 +3523,14 @@ export default class ProfilesModule {
         }
     }
 
+    renameProfile(oldName, newName) {
+        return this._renameProfile(oldName, newName);
+    }
+
+    deleteProfile(name) {
+        return this._deleteProfile(name);
+    }
+
     // ==========================================
     // Layout Positioning and Application Spawning Logic
     // ==========================================
@@ -2870,6 +3549,26 @@ export default class ProfilesModule {
                 return;
             }
 
+            this._saveSafetySnapshot('before-profile-restore', {
+                source: 'profile-restore',
+                targetProfile: profileName
+            });
+            this._applyWindowConfigs(profileName, profile, {
+                setActiveProfile: true,
+                operation: 'apply',
+                successMessage: `Switched to layout profile "${profileName}"`
+            });
+        } catch (e) {
+            const message = `Failed to apply workspace layout: ${e.message}`;
+            logError(message);
+            this._emitProfileOperation('error', 'apply', message, { name: profileName });
+        }
+    }
+
+    _applyWindowConfigs(profileName, profile, options = {}) {
+        if (!Array.isArray(profile) || !this._active) return;
+
+        try {
             const appSystem = Shell.AppSystem.get_default();
             const actors = global.get_window_actors();
             const runningWindows = actors.map(a => a.get_meta_window()).filter(w => w && w.get_window_type() === Meta.WindowType.NORMAL);
@@ -2878,6 +3577,11 @@ export default class ProfilesModule {
             // Sort profile configs in exact physical tiling order to naturally replicate the window positions
             this._clearPaperWMReconcileTimer();
             const sortedProfile = [...profile].sort((a, b) => this._compareWindowsForTiling(a, b));
+            for (const config of sortedProfile) {
+                config._restore_profile_name = profileName;
+            }
+            const autoLaunch = this._settings.get_boolean('profiles-auto-launch');
+            if (autoLaunch) this._primeContextLaunchMatching(profileName, sortedProfile);
             this._paperWMRestoreConfigs = sortedProfile.filter(config => this._hasPaperWMPlacement(config));
             for (const config of this._paperWMRestoreConfigs) {
                 delete config._matched_window;
@@ -2889,8 +3593,10 @@ export default class ProfilesModule {
             }
 
             // Set active profile name setting
-            this._lastAppliedProfile = profileName;
-            if (this._settings.get_string('profiles-active-profile') !== profileName) {
+            if (options.setActiveProfile !== false) {
+                this._lastAppliedProfile = profileName;
+            }
+            if (options.setActiveProfile !== false && this._settings.get_string('profiles-active-profile') !== profileName) {
                 try {
                     this._updatingActiveProfileSetting = true;
                     this._settings.set_string('profiles-active-profile', profileName);
@@ -2899,9 +3605,9 @@ export default class ProfilesModule {
                 }
             }
 
-            const autoLaunch = this._settings.get_boolean('profiles-auto-launch');
             this._clearLaunchTimers();
             this._clearPaperWMSlurpTimers();
+            this._clearPendingScanTimers();
             this._pendingRestorations = [];
 
             // Find optimal matches globally using our two-pass optimal assignment matrix
@@ -2973,16 +3679,29 @@ export default class ProfilesModule {
                 delay += STAGGER_MS;
             }
 
-            const message = `Switched to layout profile "${profileName}"`;
-            this._emitProfileOperation('success', 'apply', message, { name: profileName }, {
+            if (launchConfigs.length > 0) {
+                this._schedulePendingRestorationScan(delay + 900);
+                this._schedulePendingRestorationScan(delay + 2400);
+                this._schedulePendingRestorationScan(delay + 4800);
+                this._schedulePendingRestorationScan(delay + 7600);
+            }
+
+            const operation = options.operation || 'apply';
+            const message = options.successMessage || `Switched to layout profile "${profileName}"`;
+            this._emitProfileOperation('success', operation, message, {
+                name: options.statusProfile || profileName
+            }, {
                 window_count: profile.length,
                 pending_launches: this._pendingRestorations.length
             });
             this._notify(message);
         } catch (e) {
+            const operation = options.operation || 'apply';
             const message = `Failed to apply workspace layout: ${e.message}`;
             logError(message);
-            this._emitProfileOperation('error', 'apply', message, { name: profileName });
+            this._emitProfileOperation('error', operation, message, {
+                name: options.statusProfile || profileName
+            });
         }
     }
 
@@ -3009,6 +3728,18 @@ export default class ProfilesModule {
                 return GLib.SOURCE_REMOVE;
             });
 
+            if (config._context_launch_attachment) {
+                for (const delay of [900, 2200, 4200]) {
+                    GLib.timeout_add(GLib.PRIORITY_DEFAULT, delay, () => {
+                        if (!this._active) return GLib.SOURCE_REMOVE;
+
+                        this._moveWindowToWorkspace(win, config.workspace);
+                        this._applyWindowGeometry(win, config);
+                        return GLib.SOURCE_REMOVE;
+                    });
+                }
+            }
+
             return GLib.SOURCE_REMOVE;
         });
     }
@@ -3023,12 +3754,20 @@ export default class ProfilesModule {
             const wmClass = win.get_wm_class();
             const app = this._getWindowApp(win);
             const appId = app ? app.get_id() : null;
+            const candidate = {
+                win,
+                config: this._createWindowConfig(win)
+            };
+            this._addIdentityIndexes([candidate.config]);
+            this._addCreationIndexes([candidate.config]);
+            this._addLaunchIndexes([candidate]);
 
             // Verify if this newly created window matches one of our autostarted app configs
             const hasMatch = this._pendingRestorations.some(c => 
                 (appId && c.app_id === appId) || 
                 (wmClass && c.wm_class && c.wm_class.toLowerCase() === wmClass.toLowerCase()) ||
-                (win.get_title && c.title && c.title === win.get_title())
+                (win.get_title && c.title && c.title === win.get_title()) ||
+                this._scoreCandidate(c, candidate) !== -Infinity
             );
 
             if (!hasMatch) return;
@@ -3106,11 +3845,74 @@ export default class ProfilesModule {
             // Re-index remaining pending restorations
             this._addIdentityIndexes(this._pendingRestorations);
             this._addCreationIndexes(this._pendingRestorations);
+            if (this._pendingRestorations.length > 0) {
+                this._schedulePendingRestorationScan(900);
+            }
 
         } catch (e) {
             logError(`Failed during settling queue processing: ${e.message}`);
         } finally {
             this._recentlyMappedWindows = [];
+        }
+    }
+
+    _schedulePendingRestorationScan(delayMs) {
+        if (!this._active || !this._pendingRestorations || this._pendingRestorations.length === 0) return;
+
+        const timerId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, Math.max(0, delayMs), () => {
+            this._pendingScanTimerIds = (this._pendingScanTimerIds || []).filter(id => id !== timerId);
+            if (!this._active) return GLib.SOURCE_REMOVE;
+            this._scanPendingRestorations();
+            return GLib.SOURCE_REMOVE;
+        });
+        this._pendingScanTimerIds.push(timerId);
+    }
+
+    _clearPendingScanTimers() {
+        if (!this._pendingScanTimerIds) {
+            this._pendingScanTimerIds = [];
+            return;
+        }
+
+        for (const id of this._pendingScanTimerIds) {
+            try {
+                GLib.source_remove(id);
+            } catch (e) {
+                // Source may already have fired.
+            }
+        }
+        this._pendingScanTimerIds = [];
+    }
+
+    _scanPendingRestorations() {
+        if (!this._pendingRestorations || this._pendingRestorations.length === 0) return;
+
+        try {
+            const windows = global.get_window_actors()
+                .map(actor => actor.get_meta_window())
+                .filter(win => win && win.get_window_type() === Meta.WindowType.NORMAL);
+            if (windows.length === 0) return;
+
+            const candidates = this._buildRunningWindowCandidates(windows);
+            this._addLaunchIndexes(candidates);
+            const optimalMatches = this._findOptimalMatches(this._pendingRestorations, candidates);
+            const matchedConfigIndices = Array.from(optimalMatches.keys()).sort((a, b) => b - a);
+            if (matchedConfigIndices.length === 0) return;
+
+            for (const configIdx of matchedConfigIndices) {
+                const candidateIdx = optimalMatches.get(configIdx);
+                const config = this._pendingRestorations[configIdx];
+                const matchedWindow = candidates[candidateIdx].win;
+
+                log(`Delayed scan matched: ${config.wm_class || config.app_id} to window "${matchedWindow.get_title?.() || ''}"`);
+                this._positionWindow(matchedWindow, config);
+                this._pendingRestorations.splice(configIdx, 1);
+            }
+
+            this._addIdentityIndexes(this._pendingRestorations);
+            this._addCreationIndexes(this._pendingRestorations);
+        } catch (e) {
+            logError(`Failed during delayed pending restoration scan: ${e.message}`);
         }
     }
 

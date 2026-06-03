@@ -259,6 +259,12 @@
       <description>Show an application launcher icon in the top panel.</description>
     </key>
 
+    <key name="tweaks-essential-menu-panel-icon-placement" type="s">
+      <default>'before-workspaces'</default>
+      <summary>Essential Menu Panel Icon Placement</summary>
+      <description>Where to place the Essential Menu panel icon relative to the workspace switcher. Supported values are before-workspaces and after-workspaces.</description>
+    </key>
+
     <key name="tweaks-essential-menu-shortcut-enabled" type="b">
       <default>false</default>
       <summary>Enable Essential Menu Keyboard Shortcut</summary>
@@ -293,6 +299,43 @@
       <default>true</default>
       <summary>Enable Menu Backdrop Dim</summary>
       <description>Toggle the dim screen backdrop effect when the centered menu launcher pops open.</description>
+    </key>
+
+    <key name="tweaks-essential-shelf-enabled" type="b">
+      <default>true</default>
+      <summary>Enable Essential Shelf</summary>
+      <description>Enable a temporary shelf for explicitly saved files, folders, links, and text snippets.</description>
+    </key>
+
+    <key name="tweaks-essential-shelf-show-in-menu" type="b">
+      <default>true</default>
+      <summary>Show Shelf in Essential Menu</summary>
+      <description>Show Essential Shelf actions and items inside the Essential Menu quick launcher.</description>
+    </key>
+
+    <key name="tweaks-essential-shelf-show-notifications" type="b">
+      <default>true</default>
+      <summary>Show Essential Shelf Notifications</summary>
+      <description>Show desktop notifications for Essential Shelf actions.</description>
+    </key>
+
+    <key name="tweaks-essential-shelf-persist" type="b">
+      <default>true</default>
+      <summary>Persist Essential Shelf</summary>
+      <description>Keep shelf items after restarting GNOME Shell or logging out.</description>
+    </key>
+
+    <key name="tweaks-essential-shelf-max-items" type="i">
+      <default>24</default>
+      <range min="4" max="80"/>
+      <summary>Maximum Shelf Items</summary>
+      <description>Maximum number of items kept in Essential Shelf.</description>
+    </key>
+
+    <key name="tweaks-essential-shelf-trigger-clear" type="s">
+      <default>''</default>
+      <summary>Clear Essential Shelf Trigger</summary>
+      <description>Internal trigger used by preferences to request clearing the Essential Shelf.</description>
     </key>
 
     <key name="tweaks-essential-uninstall-enabled" type="b">

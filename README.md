@@ -39,8 +39,10 @@ That is the promise of the project: not novelty for its own sake, but less frict
 - An integrated Pomodoro controller that can automatically enable Deep Work during focus and disable it during rest.
 - A floating timer chip for controlling sessions while the real top panel is hidden.
 - Workspace Profiles that save and restore real window layouts, including multi-window and multi-workspace setups.
+- Workspace safety snapshots that can recover the previous layout after risky desktop transitions.
 - Tiling-aware restore support for PaperWM, Tiling Shell, Tiling Assistant, gTile, and Forge.
-- A centered Essential Menu launcher with app search, favorites, calculator, web search, and file search.
+- A centered Essential Menu launcher with app search, favorites, calculator, web search, file search, and Essential Shelf.
+- Essential Shelf for explicitly keeping temporary files, folders, links, and small snippets nearby.
 - Battery Health Sound reminders for healthy charging and low-battery moments.
 - App uninstall shortcuts in the GNOME app grid and, optionally, inside Essential Menu.
 - A clean Libadwaita settings window that keeps each feature discoverable.
@@ -52,7 +54,8 @@ That is the promise of the project: not novelty for its own sake, but less frict
 | Deep Work Focus | Reduces visual and notification noise while you work |
 | Pomodoro Timer | Runs focus/rest sessions and can control Deep Work automatically |
 | Workspace Profiles | Saves and restores window layouts across workspaces |
-| Essential Menu | Opens a fast centered launcher for apps, files, web search, and calculations |
+| Essential Menu | Opens a fast centered launcher for apps, files, web search, calculations, and shelf items |
+| Essential Shelf | Keeps selected files, folders, links, and snippets available from the launcher, with file previews when GNOME can provide them |
 | Battery Health Sound | Plays useful battery threshold reminders through the desktop sound theme |
 | App Uninstallation Utility | Adds convenient uninstall actions for installed applications |
 
@@ -275,6 +278,18 @@ When applying a profile, GNOME Essentials first tries to match saved windows to 
 
 This means profiles can be used both as a layout switcher and as a session restorer.
 
+### Workspace Safety Snapshots
+
+Workspace Profiles also keeps one hidden safety snapshot called Previous Layout.
+
+It is saved automatically before:
+
+- applying a saved profile
+- monitor layout changes
+- screen lock or suspend
+
+After the first safety snapshot exists, the Workspace Profiles panel menu shows a Restore Previous Layout action. It is intentionally simple: it does not create another visible profile, and it does not replace your saved profiles. It is there for the moments when a restore, monitor wake, or lock transition leaves the desktop in a layout you did not want.
+
 ### Tiling-Aware Restore
 
 Normal GNOME Shell geometry is only part of the story. Tiling extensions often maintain their own layout models, and a simple `move_resize_frame` is not always enough.
@@ -342,6 +357,7 @@ The menu includes:
 - calculator mode
 - web search mode
 - file search mode
+- Essential Shelf mode
 - optional backdrop dim
 - optional animations
 - light and dark styling
@@ -352,6 +368,7 @@ Search prefixes:
 = expression     Calculator
 ? query          Web search
 ~ query          File search
+# query          Essential Shelf
 ```
 
 Examples:
@@ -360,11 +377,45 @@ Examples:
 = 12 * 8
 ? gnome shell extension development
 ~ project report
+# meeting link
 ```
 
 Calculator results can be copied with Enter. Web searches open in the default browser. File results open through the system default file handler.
 
 File search uses GNOME LocalSearch when it is available on the system.
+
+### Essential Shelf
+
+Essential Shelf is a temporary work tray inside Essential Menu.
+
+It is designed for things you want close at hand while moving between windows and workspaces:
+
+- app launchers
+- files
+- folders
+- links
+- small text snippets
+- paths you deliberately keep
+
+The shelf is intentional. GNOME Essentials does not record clipboard history automatically and does not watch every copied item. Items are stored only when you explicitly keep them.
+
+Use `#` in Essential Menu to open Shelf mode. With an empty query, Shelf mode shows your saved work items first. When items exist, secondary actions appear below them for keeping the current clipboard text or clearing the shelf. With text after `#`, the menu offers to keep that text, link, path, or file URI and also filters existing shelf items.
+
+File search results also include a compact keep action, so a file found with `~` can be held nearby without opening it first. Image files and files with cached GNOME thumbnails show previews; everything else falls back to the normal file or folder icon.
+
+Application search results also include a keep action. App Shelf items store the desktop app ID, icon, and, when one is active, the current Workspace Profile name. They can also carry attached files, folders, links, and text notes. Clicking an app context launches the app, opens attached files and links, and, when the linked profile already contains that app, asks Workspace Profiles to restore that layout instead of inventing a second placement system.
+
+In Shelf mode, app attachments appear directly below their app context. The paperclip action on an app attaches the current clipboard text to that app. The paperclip action on a non-app Shelf item attaches it to the most recent app context.
+
+Shelf mode also includes a Capture Current Workspace action. It saves the current layout as a Workspace Profile and stores it as a separate workspace context item in Shelf, using a workspace/grid icon rather than a single app icon. Captured workspace contexts can contain multiple app contexts. For apps whose open file can be inferred confidently from the window title and recent local files, such as office documents, PDF readers, text editors, and code editors, GNOME Essentials attaches that file under the matching app context. File manager windows can also capture a folder context when the visible folder title maps cleanly to a known user folder or recent-file parent folder. If the file or folder cannot be identified confidently, the app is still captured without a guessed attachment.
+
+Some app contexts use app-specific open behavior. Browser app contexts open attached links in that browser. VS Code-style app contexts open attached folders and files through the editor command when it is available. Text editor contexts turn attached text notes into small files under GNOME Essentials data storage and open them in the editor. PDF and reading contexts such as Evince, Papers, Okular, MuPDF, Zathura, Xournal++, and Zotero open compatible PDF-like document files in the selected app. Office contexts such as LibreOffice, OnlyOffice, WPS Office, AbiWord, and Gnumeric open compatible document, spreadsheet, presentation, drawing, or database files in the selected app. Terminal contexts open attached folders as the working directory when the terminal supports it. Everything else keeps the generic fallback.
+
+Shelf items can be opened, copied, revealed in Files when they point to a file or folder, removed individually, or cleared from preferences.
+
+Essential Shelf also accepts external drops when GNOME Shell exposes the dropped URI or URL list. Drag selected files, folders, or links onto the Essential Menu panel icon to add them directly to Shelf; after a successful panel drop, the menu opens in Shelf mode so the added items are visible immediately. If the menu is already open, files can also be dropped onto the menu surface.
+
+For systems where Shell drag payloads are restricted, preferences include a "Send to Essential Shelf" Nautilus script installer. After installing it, selected files and folders can be sent from Files through the right-click Scripts menu.
 
 ### Super+Space Shortcut
 
@@ -441,6 +492,7 @@ modules/
   tweaks/
     batteryHealthSound.js
     essentialMenu.js
+    essentialShelf.js
     appUninstallUtility.js
 ```
 
@@ -455,6 +507,8 @@ modules/
 `modules/tweaks.js` manages the Essential Tweaks submodules.
 
 `modules/tweaks/essentialMenu.js` contains the centered launcher.
+
+`modules/tweaks/essentialShelf.js` contains Essential Shelf storage and item normalization.
 
 `modules/tweaks/batteryHealthSound.js` contains UPower battery monitoring and sound alerts.
 
@@ -553,6 +607,7 @@ GNOME Essentials is powerful, but it is still bound by what GNOME Shell and appl
 - Tiling restore depends on the runtime internals of each tiling extension. If a tiling extension changes its internal API, compatibility may need to be updated.
 - Battery sounds depend on UPower, desktop sound settings, and installed sound theme files.
 - Essential Menu file search depends on GNOME LocalSearch.
+- Essential Shelf stores references and text snippets. It does not copy file contents into its own storage.
 - App uninstallation can invoke package managers and authentication prompts. Review what is being removed before confirming.
 - Wayland users need to log out and back in after updates that require a Shell restart.
 

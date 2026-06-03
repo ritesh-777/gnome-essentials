@@ -40,6 +40,7 @@
 }
 
 .pomodoro-floating-main-button,
+.pomodoro-floating-essential-menu-button,
 .pomodoro-floating-rotate-button,
 .pomodoro-floating-reset-button,
 .pomodoro-floating-collapse-button {
@@ -52,10 +53,16 @@
 .pomodoro-floating-drag-handle:hover,
 .pomodoro-floating-peek-button:hover,
 .pomodoro-floating-main-button:hover,
+.pomodoro-floating-essential-menu-button:hover,
 .pomodoro-floating-rotate-button:hover,
 .pomodoro-floating-reset-button:hover,
 .pomodoro-floating-collapse-button:hover {
     background-color: rgba(255, 255, 255, 0.12);
+}
+
+.pomodoro-floating-essential-menu-button:active {
+    background-color: rgba(53, 132, 228, 0.24);
+    box-shadow: 0 0 0 1px rgba(153, 209, 255, 0.35);
 }
 
 /* Vertical Floating Orientation Styles */
@@ -173,6 +180,12 @@
     box-shadow: 0 3px 8px rgba(0, 0, 0, 0.24) !important;
 }
 
+.essential-menu-result:drop {
+    background-color: rgba(53, 132, 228, 0.22) !important;
+    border: 1px solid rgba(53, 132, 228, 0.78) !important;
+    box-shadow: 0 0 0 2px rgba(53, 132, 228, 0.22) !important;
+}
+
 /* Time Selector Tweak styles */
 .time-selector-layout {
     padding: 8px 16px;
@@ -259,6 +272,12 @@
     box-shadow: 0 3px 8px rgba(0, 0, 0, 0.06) !important;
 }
 
+.essential-menu-light .essential-menu-result:drop {
+    background-color: rgba(28, 113, 216, 0.12) !important;
+    border: 1px solid rgba(28, 113, 216, 0.66) !important;
+    box-shadow: 0 0 0 2px rgba(28, 113, 216, 0.14) !important;
+}
+
 .essential-menu-light StEntry StLabel {
     color: rgba(0, 0, 0, 0.44) !important;
 }
@@ -270,11 +289,21 @@
     padding: 12px 12px 18px 12px !important;
 }
 
+.essential-menu-launcher:drop {
+    border: 1px solid rgba(53, 132, 228, 0.92) !important;
+    box-shadow: 0 0 0 2px rgba(53, 132, 228, 0.28), 0 20px 48px rgba(0, 0, 0, 0.38) !important;
+}
+
 .essential-menu-launcher.essential-menu-light {
     border-radius: 16px !important;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08), 0 16px 40px rgba(0, 0, 0, 0.22) !important;
     border: 1px solid rgba(255, 255, 255, 0.85) !important;
     padding: 12px 12px 18px 12px !important;
+}
+
+.essential-menu-launcher.essential-menu-light:drop {
+    border: 1px solid rgba(28, 113, 216, 0.82) !important;
+    box-shadow: 0 0 0 2px rgba(28, 113, 216, 0.20), 0 16px 40px rgba(0, 0, 0, 0.22) !important;
 }
 
 /* Essential Menu Polished 3D Search Entry */
@@ -346,4 +375,3 @@
     spacing: 0px !important;
     padding: 0px !important;
 }
-
