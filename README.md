@@ -21,6 +21,42 @@ When you enter Deep Work, the timer, top panel, notification banners, ambient di
 
 The result is a set of desktop utilities that feel connected instead of bolted on.
 
+### System Integration Map
+
+```mermaid
+graph TD
+    classDef default fill:#1e1e24,stroke:#3a3a4a,color:#e0e0e0,stroke-width:1px;
+    classDef highlight fill:#283a5e,stroke:#4a6fa5,color:#ffffff,stroke-width:1px;
+
+    %% Modules
+    Orchestrator[Core Orchestrator]:::highlight
+    DeepWork[Deep Work Focus]
+    Pomodoro[Pomodoro Timer]
+    FloatingChip[Floating Timer Chip]
+    Profiles[Workspace Profiles]
+    SafetySnap[Safety Snapshots]
+    Tiling[Tiling-Aware Engine]
+    Launcher[Essential Menu]
+    Shelf[Essential Shelf]
+    Uninstaller[App Uninstaller]
+
+    %% Coordination lines
+    Orchestrator <--> DeepWork
+    Orchestrator <--> Profiles
+    Orchestrator <--> Launcher
+
+    %% Internal module relationships
+    DeepWork <--> Pomodoro
+    Pomodoro --> FloatingChip
+    DeepWork --> FloatingChip
+    Profiles <--> SafetySnap
+    Profiles --> Tiling
+    Launcher <--> Shelf
+    Launcher -.-> Profiles
+    Uninstaller --> Launcher
+```
+
+
 ## A Fair Word About Existing Extensions
 
 GNOME has a generous extension ecosystem, and this project respects that. Several ideas in GNOME Essentials live in the same space as existing extensions: launchers, Pomodoro timers, panel hiding, notification helpers, window/session restore, battery reminders, and app uninstall shortcuts all have relatives in other projects.
@@ -163,7 +199,9 @@ Then restart GNOME Shell again. Recompiling schemas is important whenever settin
 
 ### Deep Work Focus
 
-Deep Work Focus is the heart of GNOME Essentials. It is designed for the moment when you want the desktop to stop asking for attention.
+Deep Work Focus solves a modern desktop paradox: **while operating systems are designed to constantly pull your attention away with badges, notifications, and status indicators, focus requires sustained, uninterrupted concentration.** Every time a banner slides in or a background window updates, it costs cognitive energy to recover. 
+
+Deep Work converts your desktop from a chatty environment into a quiet, single-focus workbench.
 
 When enabled, Deep Work can:
 
@@ -217,9 +255,9 @@ If there is no focused window, the extension avoids applying the strongest focus
 
 ### Integrated Pomodoro Timer
 
-The Pomodoro timer is not just a clock sitting in the panel. It can drive Deep Work.
+A focus timer sitting passively in your status bar does not protect your time—it just counts it. The real friction of time-blocking is the manual overhead: forgetting to silence your chat apps, toggle Do Not Disturb, or hide distracting background windows when focus begins, and forgetting to restore them when it is time to rest.
 
-When the timer starts a focus block, Deep Work turns on. When the timer enters rest mode, Deep Work turns off. When the timer is reset, Deep Work turns off as well.
+The Pomodoro timer in GNOME Essentials is an **active driver**. It automates the transition: when the focus block starts, your visual surroundings instantly quiet down. When rest starts, your desktop returns to normal, prompting you to step away without manual micro-management.
 
 The timer supports:
 
@@ -236,7 +274,9 @@ The auto-stop clock is useful for hard stop times. When the system clock reaches
 
 ### Floating Timer Chip
 
-If Deep Work hides the top panel, a panel-only timer would become impossible to control. GNOME Essentials solves that with a floating timer chip.
+Hiding the top panel is necessary for zero-distraction focus, but it creates a new problem: **how do you monitor your session, pause the clock, or track missed notifications without bringing back the entire noisy status bar?**
+
+The Floating Timer Chip acts as a minimal, draggable control capsule. It stays out of your way, floating exactly where you place it. It gives you immediate access to your session time and notifications while keeping the rest of your system interface hidden, preserving your focus bubble.
 
 The floating chip can:
 
@@ -255,9 +295,9 @@ The floating chip is only shown when it is needed: during an active timer sessio
 
 ### Workspace Profiles
 
-Workspace Profiles lets you capture a working layout and bring it back later.
+Every time you switch context (e.g., from software development to writing documentation, or starting your morning routine), you waste time performing **"window Tetris"**: launching apps one by one, dragging them to specific monitors, snapping them side-by-side, and adjusting tiling layouts. This startup friction often leads to procrastination.
 
-This is useful when your desktop has structure: a terminal beside an editor, a browser on another workspace, a documentation window, a chat window, or a set of tiled apps that you do not want to rebuild by hand every time.
+Workspace Profiles eliminates this overhead by **saving your entire desktop layout as a state**. With one click, it recreates your workspace layout: it moves windows to their correct workspaces and monitors, coordinates with tiling managers, launches missing applications, and focuses your primary window, returning you to your exact working context in seconds.
 
 A saved profile includes:
 
@@ -386,7 +426,14 @@ File search uses GNOME LocalSearch when it is available on the system.
 
 ### Essential Shelf
 
-Essential Shelf is a temporary work tray inside Essential Menu.
+The Essential Shelf is a temporary workbench inside Essential Menu designed to solve a common desktop friction: **where do you put files, links, and snippets that you only need for the next hour?**
+
+Normally, users either clutter their physical desktop folder with temporary downloads, keep dozens of unrelated browser tabs open, or repeatedly navigate deep into file managers to access current files. The Shelf acts as an overlay scratchpad—a place to pin current working materials and discard them the moment the task is finished.
+
+Key workflows where the Shelf becomes indispensable:
+- **Active Task Contexts**: Keep a project's documentation link, a reference image, and a target folder pinned together in one place, accessible via keyboard from any workspace.
+- **Intentional Clipboard**: Unlike passive clipboard history managers that capture everything (including passwords, tokens, and private chats), the Shelf only stores items you explicitly send to it.
+- **Layout-Linked Launchers**: App items on the shelf don't just open a program; they carry document attachments and link directly to a Workspace Profile, letting you restore a complete working layout with a single click.
 
 It is designed for things you want close at hand while moving between windows and workspaces:
 
@@ -397,7 +444,6 @@ It is designed for things you want close at hand while moving between windows an
 - small text snippets
 - paths you deliberately keep
 
-The shelf is intentional. GNOME Essentials does not record clipboard history automatically and does not watch every copied item. Items are stored only when you explicitly keep them.
 
 Use `#` in Essential Menu to open Shelf mode. With an empty query, Shelf mode shows your saved work items first. When items exist, secondary actions appear below them for keeping the current clipboard text or clearing the shelf. With text after `#`, the menu offers to keep that text, link, path, or file URI and also filters existing shelf items.
 
@@ -425,9 +471,9 @@ If you enable it and a conflict is detected, GNOME Essentials shows a warning in
 
 ### Battery Health Sound
 
-Battery Health Sound is a small feature, but it is meant to feel immediately useful.
+Modern lithium-ion batteries degrade rapidly if left plugged in at 100% charge for long periods, or if frequently drained to absolute zero. At the same time, standard operating system battery notifications are easy to miss, leading to unexpected shutoffs that destroy unsaved work.
 
-It watches the battery through UPower and plays desktop-theme event sounds when important thresholds are reached.
+Battery Health Sound provides **ambient acoustic feedback** at key thresholds (like 80% to unplug and preserve health, or 20% to plug back in). By using distinct audio cues from your desktop theme instead of silent banners, it keeps you aware of your power state without interrupting your visual flow, protecting both your hardware lifespan and your current session.
 
 Default behavior:
 
@@ -452,7 +498,9 @@ Sounds come from the current desktop sound theme. If a preferred sound event is 
 
 ### App Uninstallation Utility
 
-The App Uninstallation Utility adds an Uninstall action where it is convenient: in the GNOME app grid context menu and, optionally, inside Essential Menu search results.
+Modern Linux desktops package software in a mix of formats: Flatpaks, Snaps, native system packages (via APT/DNF/Pacman), and Web App/PWA launchers. Because of this fragmentation, removing an application usually requires opening a heavy software store, typing command-line instructions, or dealing with orphaned system dependencies and leftover configuration clutter inside your home directory.
+
+The App Uninstallation Utility streamlines this into a **single, unified right-click action** from your GNOME app grid or launcher. It detects the package format, automates the correct terminal removal commands (requesting permissions only when system access is required), and handles leftover configuration caches to keep your system clean.
 
 It tries to identify whether an app is:
 

@@ -49,6 +49,7 @@ export default class EssentialShelf {
         this._inboxMonitor = null;
         this._inboxProcessTimeoutId = 0;
         this._processingInbox = false;
+        this._fileInfoCache = new Map();
         this._enabled = false;
     }
 
@@ -245,8 +246,13 @@ export default class EssentialShelf {
 
     remove(id) {
         const before = this._items.length;
+        const item = this._items.find(candidate => candidate.id === id);
         this._items = this._items.filter(item => item.id !== id);
         if (this._items.length !== before) {
+            if (item) {
+                const key = item.uri || item.path || item.value;
+                if (key) this._fileInfoCache.delete(key);
+            }
             this._save();
             this._emitChanged();
             return true;
@@ -259,6 +265,7 @@ export default class EssentialShelf {
         if (this._items.length === 0) return;
 
         this._items = [];
+        this._fileInfoCache.clear();
         this._save();
         this._emitChanged();
     }
@@ -383,6 +390,20 @@ export default class EssentialShelf {
         };
 
         if (normalized.type === 'file' || normalized.type === 'folder') {
+            const cacheKey = normalized.uri || normalized.path || normalized.value;
+            if (cacheKey) {
+                if (this._fileInfoCache.has(cacheKey)) {
+                    const cached = this._fileInfoCache.get(cacheKey);
+                    record.gicon = cached.gicon;
+                    record.contentType = cached.contentType;
+                    if (cached.previewGIcon) {
+                        record.previewGIcon = cached.previewGIcon;
+                        record.hasThumbnail = cached.hasThumbnail;
+                    }
+                    return record;
+                }
+            }
+
             try {
                 const file = normalized.uri
                     ? Gio.File.new_for_uri(normalized.uri)
@@ -394,6 +415,15 @@ export default class EssentialShelf {
                 if (previewGIcon) {
                     record.previewGIcon = previewGIcon;
                     record.hasThumbnail = true;
+                }
+
+                if (cacheKey) {
+                    this._fileInfoCache.set(cacheKey, {
+                        gicon: record.gicon,
+                        contentType: record.contentType,
+                        previewGIcon: record.previewGIcon,
+                        hasThumbnail: record.hasThumbnail
+                    });
                 }
             } catch (e) {
                 // Fall back to iconName.
@@ -442,6 +472,20 @@ export default class EssentialShelf {
         };
 
         if (normalizedAttachment.type === 'file' || normalizedAttachment.type === 'folder') {
+            const cacheKey = normalizedAttachment.uri || normalizedAttachment.path || normalizedAttachment.value;
+            if (cacheKey) {
+                if (this._fileInfoCache.has(cacheKey)) {
+                    const cached = this._fileInfoCache.get(cacheKey);
+                    record.gicon = cached.gicon;
+                    record.contentType = cached.contentType;
+                    if (cached.previewGIcon) {
+                        record.previewGIcon = cached.previewGIcon;
+                        record.hasThumbnail = cached.hasThumbnail;
+                    }
+                    return record;
+                }
+            }
+
             try {
                 const file = normalizedAttachment.uri
                     ? Gio.File.new_for_uri(normalizedAttachment.uri)
@@ -453,6 +497,15 @@ export default class EssentialShelf {
                 if (previewGIcon) {
                     record.previewGIcon = previewGIcon;
                     record.hasThumbnail = true;
+                }
+
+                if (cacheKey) {
+                    this._fileInfoCache.set(cacheKey, {
+                        gicon: record.gicon,
+                        contentType: record.contentType,
+                        previewGIcon: record.previewGIcon,
+                        hasThumbnail: record.hasThumbnail
+                    });
                 }
             } catch (e) {
                 // Fall back to iconName.
@@ -480,6 +533,20 @@ export default class EssentialShelf {
         };
 
         if (normalizedAttachment.type === 'file' || normalizedAttachment.type === 'folder') {
+            const cacheKey = normalizedAttachment.uri || normalizedAttachment.path || normalizedAttachment.value;
+            if (cacheKey) {
+                if (this._fileInfoCache.has(cacheKey)) {
+                    const cached = this._fileInfoCache.get(cacheKey);
+                    record.gicon = cached.gicon;
+                    record.contentType = cached.contentType;
+                    if (cached.previewGIcon) {
+                        record.previewGIcon = cached.previewGIcon;
+                        record.hasThumbnail = cached.hasThumbnail;
+                    }
+                    return record;
+                }
+            }
+
             try {
                 const file = normalizedAttachment.uri
                     ? Gio.File.new_for_uri(normalizedAttachment.uri)
@@ -491,6 +558,15 @@ export default class EssentialShelf {
                 if (previewGIcon) {
                     record.previewGIcon = previewGIcon;
                     record.hasThumbnail = true;
+                }
+
+                if (cacheKey) {
+                    this._fileInfoCache.set(cacheKey, {
+                        gicon: record.gicon,
+                        contentType: record.contentType,
+                        previewGIcon: record.previewGIcon,
+                        hasThumbnail: record.hasThumbnail
+                    });
                 }
             } catch (e) {
                 // Fall back to iconName.
@@ -585,18 +661,37 @@ export default class EssentialShelf {
         this._inboxProcessTimeoutId = 0;
     }
 
-    _processInbox() {
+    async _processInbox() {
         if (this._processingInbox) return;
 
         this._processingInbox = true;
         let claimedFile = null;
 
         try {
-            claimedFile = this._claimInboxFile();
-            if (!claimedFile) return;
+            claimedFile = await this._claimInboxFileAsync();
+            if (!claimedFile) {
+                this._processingInbox = false;
+                return;
+            }
 
-            const [, contents] = claimedFile.load_contents(null);
-            const text = imports.byteArray.toString(contents);
+            const contents = await new Promise((resolve, reject) => {
+                claimedFile.load_contents_async(null, (f, res) => {
+                    try {
+                        const [, data] = f.load_contents_finish(res);
+                        resolve(data);
+                    } catch (e) {
+                        reject(e);
+                    }
+                });
+            });
+
+            let text;
+            if (typeof TextDecoder !== 'undefined') {
+                text = new TextDecoder('utf-8').decode(contents);
+            } else {
+                text = imports.byteArray.toString(contents);
+            }
+
             const values = this._parseInboxValues(text);
             let added = 0;
 
@@ -617,7 +712,33 @@ export default class EssentialShelf {
         } finally {
             if (claimedFile) {
                 try {
-                    if (claimedFile.query_exists(null)) claimedFile.delete(null);
+                    const exists = await new Promise((resolve) => {
+                        claimedFile.query_info_async(
+                            'standard::name',
+                            Gio.FileQueryInfoFlags.NONE,
+                            GLib.PRIORITY_DEFAULT,
+                            null,
+                            (f, res) => {
+                                try {
+                                    f.query_info_finish(res);
+                                    resolve(true);
+                                } catch (err) {
+                                    resolve(false);
+                                }
+                            }
+                        );
+                    });
+                    if (exists) {
+                        await new Promise((resolve, reject) => {
+                            claimedFile.delete_async(GLib.PRIORITY_DEFAULT, null, (f, res) => {
+                                try {
+                                    resolve(f.delete_finish(res));
+                                } catch (err) {
+                                    reject(err);
+                                }
+                            });
+                        });
+                    }
                 } catch (e) {
                     logError('Failed to remove processed shelf inbox: ' + e.message);
                 }
@@ -626,19 +747,47 @@ export default class EssentialShelf {
         }
     }
 
-    _claimInboxFile() {
+    async _claimInboxFileAsync() {
         const inbox = this._getInboxFile();
-        if (!inbox.query_exists(null)) return null;
+        const exists = await new Promise((resolve) => {
+            inbox.query_info_async(
+                'standard::name',
+                Gio.FileQueryInfoFlags.NONE,
+                GLib.PRIORITY_DEFAULT,
+                null,
+                (f, res) => {
+                    try {
+                        f.query_info_finish(res);
+                        resolve(true);
+                    } catch (err) {
+                        resolve(false);
+                    }
+                }
+            );
+        });
+        if (!exists) return null;
 
         const processingPath = `${this._getInboxFilePath()}.${Date.now()}.${Math.floor(Math.random() * 100000)}.processing`;
         const processingFile = Gio.File.new_for_path(processingPath);
-        inbox.move(
-            processingFile,
-            Gio.FileCopyFlags.OVERWRITE,
-            null,
-            null
-        );
-        return processingFile;
+
+        const moved = await new Promise((resolve) => {
+            inbox.move_async(
+                processingFile,
+                Gio.FileCopyFlags.OVERWRITE,
+                GLib.PRIORITY_DEFAULT,
+                null,
+                null,
+                (f, res) => {
+                    try {
+                        resolve(f.move_finish(res));
+                    } catch (err) {
+                        resolve(false);
+                    }
+                }
+            );
+        });
+
+        return moved ? processingFile : null;
     }
 
     _parseInboxValues(text) {
@@ -733,12 +882,26 @@ export default class EssentialShelf {
                 updated_at: new Date().toISOString(),
                 items: this._items
             }, null, 2);
-            this._getStorageFile().replace_contents(
-                payload,
+
+            const file = this._getStorageFile();
+            const bytes = new GLib.Bytes(
+                typeof TextEncoder !== 'undefined'
+                    ? new TextEncoder().encode(payload)
+                    : imports.byteArray.fromString(payload)
+            );
+            file.replace_contents_async(
+                bytes,
                 null,
                 false,
                 Gio.FileCreateFlags.REPLACE_DESTINATION,
-                null
+                null,
+                (f, res) => {
+                    try {
+                        f.replace_contents_finish(res);
+                    } catch (err) {
+                        logError('Failed to save shelf storage asynchronously: ' + err.message);
+                    }
+                }
             );
         } catch (e) {
             logError('Failed to save shelf storage: ' + e.message);

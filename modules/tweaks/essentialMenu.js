@@ -367,6 +367,8 @@ export default class EssentialMenu {
         this._appRecords = [];
         this._favoriteIds = [];
         this._desktopIconCache = new Map();
+        this._absoluteIconExistsCache = new Map();
+        this._fileInfoCache = new Map();
         this._visibleRecords = [];
         this._resultButtons = [];
         this._buttonPool = [];
@@ -386,10 +388,12 @@ export default class EssentialMenu {
         this._shortcutRefreshTimeoutId = 0;
         this._shortcutLateRefreshTimeoutId = 0;
         this._panelIconRepositionTimeoutIds = [];
+        this._startupMotionId = 0;
         this._fileSearchTimeoutId = 0;
         this._fileSearchGeneration = 0;
         this._fileSearchProcess = null;
         this._fileSearchCancellable = null;
+        this._workspaceCaptureCancellable = null;
         this._xdndDragBeginId = 0;
         this._xdndDragEndId = 0;
         this._externalDndMonitor = null;
@@ -472,6 +476,7 @@ export default class EssentialMenu {
         this._disconnectSettings();
         this._settings = null;
     }
+
 
     setFloatingDropActor(actor) {
         this._floatingDropActor = actor || null;
@@ -694,6 +699,8 @@ export default class EssentialMenu {
         this._disconnectStageCapture();
         this._cancelSearchFocus();
         this._cancelFileSearch();
+        this._cancelWorkspaceCapture();
+        this._fileInfoCache.clear();
         this._cancelScrollAnimation();
         this._cancelScrollIdle();
         this._cancelShelfDragAutoExpand();
@@ -1078,6 +1085,8 @@ export default class EssentialMenu {
         }
 
         if (this._pointInsideActor(this._indicator, x, y) ||
+            this._pointInsideActor(this._indicator?.container, x, y) ||
+            this._pointInsideActor(this._indicator?.first_child, x, y) ||
             this._pointInsideActor(this._floatingDropActor, x, y)) {
             return 'panel';
         }
@@ -1313,10 +1322,9 @@ export default class EssentialMenu {
         this._clearPanelStatusAreaRole();
 
         this._indicator = new PanelMenu.Button(0.0, 'Essentials Quick Launcher', false);
+        this._indicator.track_hover = false; // Disable hover tracking during startup settlement
+
         const box = new St.BoxLayout({
-            reactive: true,
-            track_hover: true,
-            can_focus: true,
             style_class: 'panel-status-menu-box'
         });
         box.add_child(new St.Icon({
@@ -1325,8 +1333,6 @@ export default class EssentialMenu {
         }));
         this._indicator.add_child(box);
         this._connectPanelClickActor(this._indicator, 'indicator');
-        this._connectPanelClickActor(this._indicator.container, 'container');
-        this._connectPanelClickActor(box, 'icon-box');
 
         this._indicatorMenuOpenId = this._indicator.menu.connect('open-state-changed', (_menu, isOpen) => {
             if (!isOpen) return;
@@ -1338,11 +1344,42 @@ export default class EssentialMenu {
 
         Main.panel.addToStatusArea('gnome-essential-menu', this._indicator, this._getPanelIconInitialPosition(), 'left');
         this._schedulePanelIconReposition(PANEL_ICON_REPOSITION_DELAYS_MS);
+        if (typeof global.sync_pointer === 'function') {
+            global.sync_pointer();
+        }
         global.gnome_essentials_deepwork?._registerFloatingEssentialMenuDropActor?.();
         log('Panel icon added');
+
+        if (this._startupMotionId > 0) {
+            global.stage.disconnect(this._startupMotionId);
+            this._startupMotionId = 0;
+        }
+
+        this._startupMotionId = global.stage.connect('captured-event', (stage, event) => {
+            if (event.type() === Clutter.EventType.MOTION) {
+                if (this._indicator) {
+                    this._indicator.track_hover = true;
+                    if (typeof global.sync_pointer === 'function') {
+                        global.sync_pointer();
+                    }
+                }
+                if (this._startupMotionId > 0) {
+                    global.stage.disconnect(this._startupMotionId);
+                    this._startupMotionId = 0;
+                }
+            }
+            return Clutter.EVENT_PROPAGATE;
+        });
     }
 
     _destroyPanelIcon() {
+        if (this._startupMotionId > 0) {
+            try {
+                global.stage.disconnect(this._startupMotionId);
+            } catch (e) {}
+            this._startupMotionId = 0;
+        }
+
         if (!this._indicator) return;
 
         try {
@@ -1442,6 +1479,9 @@ export default class EssentialMenu {
                 leftBox.insert_child_at_index(actor, targetIndex);
             }
             log(`Panel icon positioned ${placement}; current=${currentIndex}, target=${targetIndex}, workspace=${workspaceIndex}`);
+            if (typeof global.sync_pointer === 'function') {
+                global.sync_pointer();
+            }
         } catch (e) {
             logError(`Failed to pin panel icon position: ${e.message}`);
         }
@@ -1773,6 +1813,9 @@ export default class EssentialMenu {
             vertical: true,
             x_expand: true
         });
+        this._resultsBox.connect('notify::allocation', () => {
+            this._updateResultsHeight();
+        });
         this._setScrollViewChild(this._resultsScrollView, this._resultsBox);
         this._launcher.add_child(this._resultsScrollView);
 
@@ -1926,7 +1969,9 @@ export default class EssentialMenu {
             
             // Set the scroll view height dynamically to fit the contents perfectly
             const targetHeight = Math.min(maxResultsHeight, naturalHeight);
-            this._resultsScrollView.set_height(targetHeight);
+            if (this._resultsScrollView.get_height() !== targetHeight) {
+                this._resultsScrollView.set_height(targetHeight);
+            }
         } catch (e) {
             logError(`Failed to update results height: ${e.message}`);
         }
@@ -2253,7 +2298,14 @@ export default class EssentialMenu {
             return;
         }
 
-        const localsearch = GLib.find_program_in_path('localsearch');
+        let localsearch = GLib.find_program_in_path('localsearch');
+        if (!localsearch) {
+            localsearch = GLib.find_program_in_path('tracker3');
+        }
+        if (!localsearch) {
+            localsearch = GLib.find_program_in_path('tracker');
+        }
+
         if (!localsearch) {
             this._showInfoLabel('GNOME LocalSearch is not available');
             this._updateResultsHeight();
@@ -2341,6 +2393,10 @@ export default class EssentialMenu {
     }
 
     _createFileRecord(uri) {
+        if (this._fileInfoCache.has(uri)) {
+            return this._fileInfoCache.get(uri);
+        }
+
         try {
             const file = Gio.File.new_for_uri(uri);
             const path = file.get_path();
@@ -2367,9 +2423,11 @@ export default class EssentialMenu {
                 record.previewGIcon = previewGIcon;
                 record.hasThumbnail = true;
             }
+            this._fileInfoCache.set(uri, record);
             return record;
         } catch (e) {
             logError(`Failed to read file search result ${uri}: ${e.message}`);
+            this._fileInfoCache.set(uri, null);
             return null;
         }
     }
@@ -2630,6 +2688,8 @@ export default class EssentialMenu {
 
         this._updateSelection();
         this._updateResultsHeight();
+        delete this._justExpandedIndex;
+        delete this._justExpandedDepth;
     }
 
     _decorateShelfTreeRecord(record, options = {}) {
@@ -3307,7 +3367,39 @@ export default class EssentialMenu {
 
         const animEnabled = this._settings?.get_boolean('tweaks-essential-menu-animations-enabled') ?? true;
 
-        if (isSame || !animEnabled) {
+        // Check if this button is a descendant of the newly expanded row
+        let shouldAnimateExpand = false;
+        if (this._justExpandedIndex !== undefined && poolIndex > this._justExpandedIndex) {
+            if (record.depth > this._justExpandedDepth) {
+                shouldAnimateExpand = true;
+            } else {
+                // We reached the end of the descendant list, clear the tracking variables
+                delete this._justExpandedIndex;
+                delete this._justExpandedDepth;
+            }
+        }
+
+        if (shouldAnimateExpand && animEnabled) {
+            const [, targetHeight] = button.get_preferred_height(-1);
+            button.clip_to_allocation = true;
+            button.height = 0;
+            button.opacity = 0;
+            button.scale_y = 0;
+            button.translation_x = 0;
+            button.visible = true;
+            button.remove_all_transitions();
+            button.ease({
+                height: targetHeight,
+                opacity: 255,
+                scale_y: 1,
+                duration: 150,
+                mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+                onComplete: () => {
+                    button.set_height(-1);
+                    button.clip_to_allocation = false;
+                }
+            });
+        } else if (isSame || !animEnabled) {
             button.translation_x = 0;
             button.visible = true;
         } else {
@@ -3448,12 +3540,18 @@ export default class EssentialMenu {
         const iconName = record?.iconName || 'application-x-executable';
 
         try {
-            if (GLib.path_is_absolute(iconName) &&
-                Gio.File.new_for_path(iconName).query_exists(null)) {
-                return new St.Icon({
-                    gicon: Gio.FileIcon.new(Gio.File.new_for_path(iconName)),
-                    icon_size: size
-                });
+            if (GLib.path_is_absolute(iconName)) {
+                let exists = this._absoluteIconExistsCache.get(iconName);
+                if (exists === undefined) {
+                    exists = Gio.File.new_for_path(iconName).query_exists(null);
+                    this._absoluteIconExistsCache.set(iconName, exists);
+                }
+                if (exists) {
+                    return new St.Icon({
+                        gicon: Gio.FileIcon.new(Gio.File.new_for_path(iconName)),
+                        icon_size: size
+                    });
+                }
             }
         } catch (e) {
             // Fall through to icon theme lookup.
@@ -4705,6 +4803,86 @@ export default class EssentialMenu {
         if (!this._isShelfAvailable() || !record?.collapsible) return;
 
         const nextCollapsed = !record.collapsed;
+        const parentIndex = this._visibleRecords.findIndex(r => r.id === record.id && r.kind === record.kind);
+        const animEnabled = this._settings?.get_boolean('tweaks-essential-menu-animations-enabled') ?? true;
+
+        if (nextCollapsed) {
+            // Collapsing: find descendants and animate them out first
+            const parentDepth = record.depth || 0;
+            const descendantButtons = [];
+
+            if (parentIndex !== -1) {
+                for (let i = parentIndex + 1; i < this._visibleRecords.length; i++) {
+                    const nextRecord = this._visibleRecords[i];
+                    if (nextRecord.depth > parentDepth) {
+                        const btn = this._resultButtons[i];
+                        if (btn) {
+                            descendantButtons.push(btn);
+                        }
+                    } else {
+                        break;
+                    }
+                }
+            }
+
+            if (parentIndex !== -1) {
+                const parentBtn = this._resultButtons[parentIndex];
+                if (parentBtn && parentBtn._collapseBtn) {
+                    parentBtn._collapseBtn.set_child(new St.Icon({
+                        icon_name: 'pan-end-symbolic',
+                        icon_size: 14
+                    }));
+                }
+            }
+
+            if (animEnabled && descendantButtons.length > 0) {
+                let completedCount = 0;
+                const totalDescendants = descendantButtons.length;
+
+                descendantButtons.forEach(btn => {
+                    btn.clip_to_allocation = true;
+                    btn.remove_all_transitions();
+                    btn.ease({
+                        height: 0,
+                        opacity: 0,
+                        scale_y: 0,
+                        duration: 150,
+                        mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+                        onComplete: () => {
+                            btn.set_height(-1);
+                            btn.opacity = 255;
+                            btn.scale_y = 1;
+                            btn.clip_to_allocation = false;
+
+                            completedCount++;
+                            if (completedCount === totalDescendants) {
+                                this._saveAndRebuildCollapseState(record, nextCollapsed);
+                            }
+                        }
+                    });
+                });
+            } else {
+                this._saveAndRebuildCollapseState(record, nextCollapsed);
+            }
+        } else {
+            // Expanding: set transition source properties and rebuild list
+            if (animEnabled && parentIndex !== -1) {
+                this._justExpandedIndex = parentIndex;
+                this._justExpandedDepth = record.depth || 0;
+
+                const parentBtn = this._resultButtons[parentIndex];
+                if (parentBtn && parentBtn._collapseBtn) {
+                    parentBtn._collapseBtn.set_child(new St.Icon({
+                        icon_name: 'pan-down-symbolic',
+                        icon_size: 14
+                    }));
+                }
+            }
+            this._saveAndRebuildCollapseState(record, nextCollapsed);
+        }
+    }
+
+    _saveAndRebuildCollapseState(record, nextCollapsed) {
         if (record.kind === 'shelf-item') {
             const item = record.shelfItem;
             if (item?.id) {
@@ -4718,7 +4896,9 @@ export default class EssentialMenu {
             }
         }
 
-        if (this._isOpen) this._renderResults(this._getSearchText());
+        if (this._isOpen) {
+            this._renderResults(this._getSearchText());
+        }
     }
 
     _renameShelfWorkspaceRecord(record) {
@@ -4780,7 +4960,7 @@ export default class EssentialMenu {
         entry.clutter_text?.connect?.('activate', submit);
     }
 
-    _overrideShelfWorkspaceRecord(record) {
+    async _overrideShelfWorkspaceRecord(record) {
         if (!this._isShelfAvailable() || record?.kind !== 'shelf-item') return;
 
         const item = record.shelfItem;
@@ -4795,6 +4975,15 @@ export default class EssentialMenu {
             return;
         }
 
+        if (this._workspaceCaptureCancellable) {
+            try {
+                this._workspaceCaptureCancellable.cancel();
+            } catch (e) {}
+            this._workspaceCaptureCancellable = null;
+        }
+        this._workspaceCaptureCancellable = new Gio.Cancellable();
+        const cancellable = this._workspaceCaptureCancellable;
+
         const result = profiles.saveCurrentLayout(profileName, {
             source: 'shelf-context',
             overwrite: true,
@@ -4803,22 +4992,36 @@ export default class EssentialMenu {
 
         if (!result?.ok) {
             this._notifyShelf(result?.message || `Could not update "${profileName}".`);
+            this._workspaceCaptureCancellable = null;
             return;
         }
 
-        const profile = this._getWorkspaceProfileEntry(profileName);
-        const contexts = this._buildWorkspaceContextsFromProfile(profile);
-        const updated = this._shelf?.updateWorkspaceContext?.(item.id, profileName, item.label || profileName, contexts, {
-            preserveExistingAttachments: true
-        });
+        try {
+            const profile = this._getWorkspaceProfileEntry(profileName);
+            const contexts = await this._buildWorkspaceContextsFromProfile(profile, cancellable);
+            if (cancellable.is_cancelled()) return;
 
-        if (updated) {
-            this._notifyShelf(`Updated workspace context "${updated.label || profileName}".`);
-        } else {
-            this._notifyShelf(`Updated "${profileName}", but could not refresh its Shelf context.`);
+            const updated = this._shelf?.updateWorkspaceContext?.(item.id, profileName, item.label || profileName, contexts, {
+                preserveExistingAttachments: true
+            });
+
+            if (updated) {
+                this._notifyShelf(`Updated workspace context "${updated.label || profileName}".`);
+            } else {
+                this._notifyShelf(`Updated "${profileName}", but could not refresh its Shelf context.`);
+            }
+
+            if (this._isOpen) this._renderResults(this._getSearchText());
+        } catch (e) {
+            if (!cancellable.is_cancelled()) {
+                logError(`Failed to update workspace contexts: ${e.message}`);
+                this._notifyShelf(`Updated "${profileName}", but failed to rebuild contexts.`);
+            }
+        } finally {
+            if (this._workspaceCaptureCancellable === cancellable) {
+                this._workspaceCaptureCancellable = null;
+            }
         }
-
-        if (this._isOpen) this._renderResults(this._getSearchText());
     }
 
     _renameWorkspaceProfile(oldName, newName) {
@@ -5224,6 +5427,15 @@ export default class EssentialMenu {
             return;
         }
 
+        if (this._workspaceCaptureCancellable) {
+            try {
+                this._workspaceCaptureCancellable.cancel();
+            } catch (e) {}
+            this._workspaceCaptureCancellable = null;
+        }
+        this._workspaceCaptureCancellable = new Gio.Cancellable();
+        const cancellable = this._workspaceCaptureCancellable;
+
         const profileName = this._generateWorkspaceContextProfileName();
         const result = profiles.saveCurrentLayout(profileName, {
             source: 'shelf-context',
@@ -5232,29 +5444,40 @@ export default class EssentialMenu {
 
         if (!result?.ok) {
             this._notifyShelf(result?.message || 'Could not capture workspace context.');
+            this._workspaceCaptureCancellable = null;
             return;
         }
 
         const profile = this._getWorkspaceProfileEntry(profileName);
-        const contexts = this._buildWorkspaceContextsFromProfile(profile);
-        const item = this._shelf.addWorkspaceContext(profileName, profileName, contexts);
-        if (!item) {
-            this._notifyShelf('Captured layout, but could not add it to Shelf.');
-            return;
-        }
+        this._buildWorkspaceContextsFromProfile(profile, cancellable).then(contexts => {
+            if (cancellable.is_cancelled()) return;
+            const item = this._shelf.addWorkspaceContext(profileName, profileName, contexts);
+            if (!item) {
+                this._notifyShelf('Captured layout, but could not add it to Shelf.');
+                return;
+            }
 
-        const contextCount = Array.isArray(item.contexts) ? item.contexts.length : 0;
-        const attachmentCount = (item.contexts || []).reduce((total, context) => {
-            const attachments = Array.isArray(context.attachments) ? context.attachments.length : 0;
-            return total + attachments;
-        }, 0);
-        const contextText = `${contextCount} app${contextCount === 1 ? '' : 's'}`;
-        const attachmentText = attachmentCount > 0
-            ? ` and ${attachmentCount} context item${attachmentCount === 1 ? '' : 's'}`
-            : '';
-        this._notifyShelf(`Captured "${item.label}" with ${contextText}${attachmentText}.`);
+            const contextCount = Array.isArray(item.contexts) ? item.contexts.length : 0;
+            const attachmentCount = (item.contexts || []).reduce((total, context) => {
+                const attachments = Array.isArray(context.attachments) ? context.attachments.length : 0;
+                return total + attachments;
+            }, 0);
+            const contextText = `${contextCount} app${contextCount === 1 ? '' : 's'}`;
+            const attachmentText = attachmentCount > 0
+                ? ` and ${attachmentCount} context item${attachmentCount === 1 ? '' : 's'}`
+                : '';
+            this._notifyShelf(`Captured "${item.label}" with ${contextText}${attachmentText}.`);
 
-        if (this._isOpen) this._renderResults(this._getSearchText());
+            if (this._isOpen) this._renderResults(this._getSearchText());
+        }).catch(e => {
+            if (cancellable.is_cancelled()) return;
+            logError(`Failed to build workspace contexts: ${e.message}`);
+            this._notifyShelf('Captured layout, but failed to process workspace contexts.');
+        }).finally(() => {
+            if (this._workspaceCaptureCancellable === cancellable) {
+                this._workspaceCaptureCancellable = null;
+            }
+        });
     }
 
     _generateWorkspaceContextProfileName() {
@@ -5276,14 +5499,16 @@ export default class EssentialMenu {
         return name;
     }
 
-    _buildWorkspaceContextsFromProfile(profile) {
+    async _buildWorkspaceContextsFromProfile(profile, cancellable = null) {
         const windows = Array.isArray(profile?.windows) ? profile.windows : [];
         if (windows.length === 0) return [];
 
-        const recentFiles = this._loadRecentFileCandidates();
+        const recentFiles = await this._loadRecentFileCandidates();
+        if (cancellable?.is_cancelled()) return [];
         const contexts = new Map();
 
         for (const config of windows) {
+            if (cancellable?.is_cancelled()) return [];
             const appId = String(config?.app_id || '').trim();
             if (!appId) continue;
 
@@ -5305,7 +5530,8 @@ export default class EssentialMenu {
             }
 
             const context = contexts.get(key);
-            const attachment = this._inferWindowContextAttachment(config, context, recentFiles);
+            const attachment = await this._inferWindowContextAttachment(config, context, recentFiles, cancellable);
+            if (cancellable?.is_cancelled()) return [];
             const attachmentKey = attachment ? `${attachment.type}:${attachment.uri || attachment.path || attachment.value}`.toLowerCase() : '';
             if (attachment && attachmentKey && !context._attachmentKeys.has(attachmentKey)) {
                 context.attachments.push(attachment);
@@ -5321,7 +5547,7 @@ export default class EssentialMenu {
         });
     }
 
-    _inferWindowContextAttachment(config, context, recentFiles) {
+    async _inferWindowContextAttachment(config, context, recentFiles, cancellable = null) {
         const title = String(config?.title || '').trim();
         if (!title) return null;
         const recentFileList = Array.isArray(recentFiles) ? recentFiles : [];
@@ -5337,7 +5563,7 @@ export default class EssentialMenu {
             if (folderAttachment && !this._isGenericFileManagerTitle(title)) return folderAttachment;
             const titleFolderAttachment = this._inferFolderContextAttachmentFromTitle(config);
             if (titleFolderAttachment) return titleFolderAttachment;
-            const searchedFolderAttachment = this._inferFolderContextAttachmentByTitleSearch(config, recentFileList);
+            const searchedFolderAttachment = await this._inferFolderContextAttachmentByTitleSearch(config, recentFileList, cancellable);
             if (searchedFolderAttachment) return searchedFolderAttachment;
         }
 
@@ -5419,14 +5645,14 @@ export default class EssentialMenu {
         return null;
     }
 
-    _inferFolderContextAttachmentByTitleSearch(config, recentFiles) {
+    async _inferFolderContextAttachmentByTitleSearch(config, recentFiles, cancellable = null) {
         const title = String(config?.title || '').trim();
         if (!title || this._isGenericFileManagerTitle(title)) return null;
 
         const titleKey = this._normalizeContextTitle(title);
         if (!titleKey || titleKey.length < 3) return null;
 
-        const matches = this._findFolderPathsByTitleKey(titleKey, recentFiles);
+        const matches = await this._findFolderPathsByTitleKey(titleKey, recentFiles, cancellable);
         if (matches.length !== 1) return null;
 
         return this._createCapturedFolderAttachment(matches[0], {
@@ -5434,7 +5660,7 @@ export default class EssentialMenu {
         });
     }
 
-    _findFolderPathsByTitleKey(titleKey, recentFiles) {
+    async _findFolderPathsByTitleKey(titleKey, recentFiles, cancellable = null) {
         const roots = this._folderTitleSearchRoots(recentFiles);
         const matches = new Map();
         let visited = 0;
@@ -5444,7 +5670,8 @@ export default class EssentialMenu {
             return elapsedMs >= FOLDER_TITLE_SEARCH_MAX_MS;
         };
 
-        const visit = (path, depth) => {
+        const visit = async (path, depth) => {
+            if (cancellable?.is_cancelled()) return;
             if (!path ||
                 depth > FOLDER_TITLE_SEARCH_MAX_DEPTH ||
                 visited >= FOLDER_TITLE_SEARCH_MAX_VISITS ||
@@ -5452,11 +5679,14 @@ export default class EssentialMenu {
                 return;
             }
 
-            let file = null;
+            let file;
+            let info;
             try {
                 file = Gio.File.new_for_path(path);
-                if (!file.query_exists(null)) return;
-                if (file.query_file_type(Gio.FileQueryInfoFlags.NONE, null) !== Gio.FileType.DIRECTORY) return;
+                info = await this._queryFileInfoAsync(file, 'standard::name,standard::type', cancellable);
+                if (cancellable?.is_cancelled()) return;
+                if (!info) return;
+                if (info.get_file_type() !== Gio.FileType.DIRECTORY) return;
             } catch (e) {
                 return;
             }
@@ -5473,48 +5703,114 @@ export default class EssentialMenu {
                 return;
             }
 
-            let enumerator = null;
+            let enumerator = await this._enumerateChildrenAsync(file, 'standard::name,standard::type', cancellable);
+            if (cancellable?.is_cancelled()) return;
+            if (!enumerator) return;
+
             try {
-                enumerator = file.enumerate_children(
-                    'standard::name,standard::type',
-                    Gio.FileQueryInfoFlags.NONE,
-                    null
-                );
+                const childInfos = await this._nextFilesAsync(enumerator, 100, cancellable);
+                if (cancellable?.is_cancelled()) return;
 
-                let info = null;
-                while ((info = enumerator.next_file(null)) !== null &&
-                    visited < FOLDER_TITLE_SEARCH_MAX_VISITS &&
-                    !timedOut()) {
-                    if (info.get_file_type?.() !== Gio.FileType.DIRECTORY) continue;
+                for (const childInfo of childInfos) {
+                    if (cancellable?.is_cancelled()) break;
+                    if (visited >= FOLDER_TITLE_SEARCH_MAX_VISITS || timedOut()) break;
 
-                    const name = info.get_name?.() || '';
+                    if (childInfo.get_file_type() !== Gio.FileType.DIRECTORY) continue;
+
+                    const name = childInfo.get_name() || '';
                     if (!name ||
                         name.startsWith('.') ||
                         FOLDER_TITLE_SEARCH_SKIP_NAMES.has(name)) {
                         continue;
                     }
 
-                    visit(GLib.build_filenamev([path, name]), depth + 1);
+                    const childPath = GLib.build_filenamev([path, name]);
+                    await visit(childPath, depth + 1);
                 }
             } catch (e) {
                 // Directory title search is best-effort.
             } finally {
                 try {
-                    enumerator?.close(null);
+                    enumerator.close(null);
                 } catch (e) {
-                    // Enumerator may already be closed.
+                    // Ignore already closed.
                 }
             }
         };
 
         for (const root of roots) {
-            visit(root, 0);
+            if (cancellable?.is_cancelled()) break;
+            await visit(root, 0);
             if (matches.size > 1) break;
             if (visited >= FOLDER_TITLE_SEARCH_MAX_VISITS) break;
             if (timedOut()) break;
         }
 
         return [...matches.values()];
+    }
+
+    _cancelWorkspaceCapture() {
+        if (this._workspaceCaptureCancellable) {
+            try {
+                this._workspaceCaptureCancellable.cancel();
+            } catch (e) {
+                // Already completed or cancelled.
+            }
+            this._workspaceCaptureCancellable = null;
+        }
+    }
+
+    _queryFileInfoAsync(file, attributes, cancellable = null) {
+        return new Promise((resolve) => {
+            file.query_info_async(
+                attributes,
+                Gio.FileQueryInfoFlags.NONE,
+                GLib.PRIORITY_DEFAULT,
+                cancellable,
+                (f, res) => {
+                    try {
+                        resolve(f.query_info_finish(res));
+                    } catch (e) {
+                        resolve(null);
+                    }
+                }
+            );
+        });
+    }
+
+    _enumerateChildrenAsync(file, attributes, cancellable = null) {
+        return new Promise((resolve) => {
+            file.enumerate_children_async(
+                attributes,
+                Gio.FileQueryInfoFlags.NONE,
+                GLib.PRIORITY_DEFAULT,
+                cancellable,
+                (f, res) => {
+                    try {
+                        resolve(f.enumerate_children_finish(res));
+                    } catch (e) {
+                        resolve(null);
+                    }
+                }
+            );
+        });
+    }
+
+    _nextFilesAsync(enumerator, limit, cancellable = null) {
+        return new Promise((resolve) => {
+            enumerator.next_files_async(
+                limit,
+                GLib.PRIORITY_DEFAULT,
+                cancellable,
+                (e, res) => {
+                    try {
+                        resolve(e.next_files_finish(res) || []);
+                    } catch (err) {
+                        resolve([]);
+                    }
+                }
+            );
+        });
     }
 
     _folderTitleSearchRoots(recentFiles) {
@@ -5878,15 +6174,72 @@ export default class EssentialMenu {
         ].includes(titleText);
     }
 
-    _loadRecentFileCandidates() {
+    _queryExistsAsync(file) {
+        return new Promise(resolve => {
+            file.query_info_async(
+                'standard::name',
+                Gio.FileQueryInfoFlags.NONE,
+                GLib.PRIORITY_DEFAULT,
+                null,
+                (f, res) => {
+                    try {
+                        f.query_info_finish(res);
+                        resolve(true);
+                    } catch (e) {
+                        resolve(false);
+                    }
+                }
+            );
+        });
+    }
+
+    async _loadRecentFileCandidates() {
         const recentPath = GLib.build_filenamev([GLib.get_user_data_dir(), 'recently-used.xbel']);
         const recentFile = Gio.File.new_for_path(recentPath);
-        if (!recentFile.query_exists(null)) return [];
+        
+        let exists;
+        try {
+            exists = await new Promise((resolve) => {
+                recentFile.query_info_async(
+                    'standard::name',
+                    Gio.FileQueryInfoFlags.NONE,
+                    GLib.PRIORITY_DEFAULT,
+                    null,
+                    (f, res) => {
+                        try {
+                            f.query_info_finish(res);
+                            resolve(true);
+                        } catch (e) {
+                            resolve(false);
+                        }
+                    }
+                );
+            });
+        } catch (e) {
+            exists = false;
+        }
+        if (!exists) return [];
 
         try {
-            const [, contents] = recentFile.load_contents(null);
-            const text = imports.byteArray.toString(contents);
-            const candidates = [];
+            const contents = await new Promise((resolve, reject) => {
+                recentFile.load_contents_async(null, (f, res) => {
+                    try {
+                        const [, data] = f.load_contents_finish(res);
+                        resolve(data);
+                    } catch (e) {
+                        reject(e);
+                    }
+                });
+            });
+
+            let text;
+            if (typeof TextDecoder !== 'undefined') {
+                text = new TextDecoder('utf-8').decode(contents);
+            } else {
+                text = imports.byteArray.toString(contents);
+            }
+
+            const rawCandidates = [];
             const bookmarkRe = /<bookmark\b([^>]*)>([\s\S]*?)<\/bookmark>/g;
             let match = null;
 
@@ -5897,8 +6250,6 @@ export default class EssentialMenu {
                 if (!href || !href.startsWith('file://')) continue;
 
                 const file = Gio.File.new_for_uri(href);
-                if (!file.query_exists(null)) continue;
-
                 const path = file.get_path?.() || '';
                 const basename = file.get_basename?.() || '';
                 if (!path || !basename) continue;
@@ -5911,7 +6262,8 @@ export default class EssentialMenu {
                     this._extractXmlAttribute(body, 'modified') ||
                     this._extractXmlAttribute(body, 'visited');
 
-                candidates.push({
+                rawCandidates.push({
+                    file,
                     uri: href,
                     path,
                     basename,
@@ -5921,7 +6273,28 @@ export default class EssentialMenu {
                 });
             }
 
-            candidates.sort((a, b) => b.timestamp - a.timestamp);
+            rawCandidates.sort((a, b) => b.timestamp - a.timestamp);
+            const limitedCandidates = rawCandidates.slice(0, 150);
+
+            const existsResults = await Promise.all(
+                limitedCandidates.map(c => this._queryExistsAsync(c.file))
+            );
+
+            const candidates = [];
+            for (let i = 0; i < limitedCandidates.length; i++) {
+                if (existsResults[i]) {
+                    const c = limitedCandidates[i];
+                    candidates.push({
+                        uri: c.uri,
+                        path: c.path,
+                        basename: c.basename,
+                        stem: c.stem,
+                        contentType: c.contentType,
+                        timestamp: c.timestamp
+                    });
+                }
+            }
+
             return candidates;
         } catch (e) {
             logError(`Failed to read recent files for workspace capture: ${e.message}`);

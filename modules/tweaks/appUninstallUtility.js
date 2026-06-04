@@ -496,9 +496,10 @@ export default class AppUninstallUtility {
         // Distro-aware execution script resolving symlinks and sanitizing package queries
         const resolveAndRemoveCmd = `
 DELETE_DEPS="$1"
-REAL_PATH=$(realpath "${desktopPath}")
+DESKTOP_PATH="$2"
+REAL_PATH=$(realpath "$DESKTOP_PATH")
 if [ -z "$REAL_PATH" ] || [ ! -f "$REAL_PATH" ]; then
-    REAL_PATH="${desktopPath}"
+    REAL_PATH="$DESKTOP_PATH"
 fi
 
 if command -v pacman >/dev/null; then
@@ -581,7 +582,7 @@ else
     exit 1
 fi
 `;
-        const args = ['bash', '-c', resolveAndRemoveCmd, 'sh', deleteDeps ? 'true' : 'false'];
+        const args = ['bash', '-c', resolveAndRemoveCmd, 'sh', deleteDeps ? 'true' : 'false', desktopPath];
         return await this._runCommandAsync(args);
     }
 

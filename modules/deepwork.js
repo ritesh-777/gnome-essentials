@@ -90,6 +90,7 @@ export default class DeepWorkModule {
         this._pomodoroRemaining = 0;
         this._pomodoroState = 'focus'; // 'focus' or 'rest'
         this._pomodoroButton = null;
+        this._pomodoroMenuTitle = null;
         this._pomodoroLabel = null;
         this._pomodoroClockTimerId = 0;
         this._pomodoroClockLastTriggerKey = null;
@@ -1451,7 +1452,10 @@ export default class DeepWorkModule {
 
             try {
                 if (win !== focusedWindow && actor !== focusedActor) {
-                    actor.set_opacity(Math.round(dimOpacityVal * 255));
+                    const targetOpacity = Math.round(dimOpacityVal * 255);
+                    if (actor.get_opacity() !== targetOpacity) {
+                        actor.set_opacity(targetOpacity);
+                    }
 
                     if (blurIntensity > 0) {
                         if (!actor._deepworkBlurEffect) {
@@ -1468,19 +1472,24 @@ export default class DeepWorkModule {
                         }
                         
                         const effect = actor._deepworkBlurEffect;
-                        if (typeof effect.set_radius === 'function') {
-                            effect.set_radius(targetSigma * 2);
-                        } else if (typeof effect.set_sigma === 'function') {
-                            effect.set_sigma(targetSigma);
-                        } else {
-                            effect.radius = targetSigma * 2;
+                        if (effect._lastSigma !== targetSigma) {
+                            if (typeof effect.set_radius === 'function') {
+                                effect.set_radius(targetSigma * 2);
+                            } else if (typeof effect.set_sigma === 'function') {
+                                effect.set_sigma(targetSigma);
+                            } else {
+                                effect.radius = targetSigma * 2;
+                            }
+                            effect._lastSigma = targetSigma;
                         }
                     } else if (actor._deepworkBlurEffect) {
                         actor.remove_effect(actor._deepworkBlurEffect);
                         delete actor._deepworkBlurEffect;
                     }
                 } else {
-                    actor.set_opacity(255);
+                    if (actor.get_opacity() !== 255) {
+                        actor.set_opacity(255);
+                    }
                     if (actor._deepworkBlurEffect) {
                         actor.remove_effect(actor._deepworkBlurEffect);
                         delete actor._deepworkBlurEffect;
@@ -1519,10 +1528,9 @@ export default class DeepWorkModule {
             try {
                 if (win !== focusedWindow && actor !== focusedActor) {
                     // Stacking and window-level dimming
-                    if (keepDim) {
-                        actor.set_opacity(Math.round(dimOpacityVal * 255));
-                    } else {
-                        actor.set_opacity(255);
+                    const targetOpacity = keepDim ? Math.round(dimOpacityVal * 255) : 255;
+                    if (actor.get_opacity() !== targetOpacity) {
+                        actor.set_opacity(targetOpacity);
                     }
                     
                     // Stacking and window-level blur
@@ -1542,12 +1550,15 @@ export default class DeepWorkModule {
                         }
                         
                         const effect = actor._deepworkBlurEffect;
-                        if (typeof effect.set_radius === 'function') {
-                            effect.set_radius(targetSigma * 2);
-                        } else if (typeof effect.set_sigma === 'function') {
-                            effect.set_sigma(targetSigma);
-                        } else {
-                            effect.radius = targetSigma * 2;
+                        if (effect._lastSigma !== targetSigma) {
+                            if (typeof effect.set_radius === 'function') {
+                                effect.set_radius(targetSigma * 2);
+                            } else if (typeof effect.set_sigma === 'function') {
+                                effect.set_sigma(targetSigma);
+                            } else {
+                                effect.radius = targetSigma * 2;
+                            }
+                            effect._lastSigma = targetSigma;
                         }
                     } else {
                         if (actor._deepworkBlurEffect) {
@@ -1557,7 +1568,9 @@ export default class DeepWorkModule {
                     }
                 } else {
                     // Focused window is always fully bright and sharp
-                    actor.set_opacity(255);
+                    if (actor.get_opacity() !== 255) {
+                        actor.set_opacity(255);
+                    }
                     if (actor._deepworkBlurEffect) {
                         actor.remove_effect(actor._deepworkBlurEffect);
                         delete actor._deepworkBlurEffect;
@@ -1622,8 +1635,10 @@ export default class DeepWorkModule {
             150,
             () => {
                 if (this._active && this._ambientOverlay && this._ambientOverlayMode === 'soft') {
-                    this._ambientAngle = (this._ambientAngle + 1) % 360;
-                    this._updateAmbientGradient();
+                    if (!Main.overview.visible) {
+                        this._ambientAngle = (this._ambientAngle + 1) % 360;
+                        this._updateAmbientGradient();
+                    }
                     return GLib.SOURCE_CONTINUE;
                 }
                 this._ambientTimerId = 0;
@@ -1961,8 +1976,8 @@ export default class DeepWorkModule {
             this._pomodoroButton.add_child(box);
 
             // Simple Dropdown Title
-            const menuTitle = new PopupMenu.PopupMenuItem('Deep Work Timer', { reactive: false });
-            this._pomodoroButton.menu.addMenuItem(menuTitle);
+            this._pomodoroMenuTitle = new PopupMenu.PopupMenuItem('Deep Work Timer', { reactive: false });
+            this._pomodoroButton.menu.addMenuItem(this._pomodoroMenuTitle);
 
             // Control Items
             this._playPauseItem = new PopupMenu.PopupMenuItem('Start Session');
@@ -2266,6 +2281,13 @@ export default class DeepWorkModule {
                 POMODORO_REST_MINUTES_MIN,
                 POMODORO_REST_MINUTES_MAX
             );
+
+            if (this._pomodoroMenuTitle) {
+                const titleText = isInfinite
+                    ? 'Deep Work Timer (∞ / 0m)'
+                    : `Deep Work Timer (${focus}m / ${rest}m)`;
+                this._pomodoroMenuTitle.label.set_text(titleText);
+            }
 
             if (this._pomodoroFocusInfiniteToggle) {
                 this._pomodoroFocusInfiniteToggle.setToggleState?.(isInfinite);
@@ -2906,6 +2928,7 @@ export default class DeepWorkModule {
             pointerOffsetY: stageY - this._floatingPomodoroActor.y
         };
         this._floatingPomodoroActor.add_style_pseudo_class('dragging');
+        this._raiseFloatingPomodoro(); // Raise once at the start of drag
         this._connectFloatingPomodoroDragCapture();
         return Clutter.EVENT_STOP;
     }
@@ -2958,7 +2981,6 @@ export default class DeepWorkModule {
         );
 
         this._floatingPomodoroActor.set_position(x, y);
-        this._raiseFloatingPomodoro();
     }
 
     _finishFloatingPomodoroDrag() {
@@ -3714,6 +3736,7 @@ export default class DeepWorkModule {
 
         if (this._pomodoroLabel) {
             this._pomodoroLabel.set_text(timeText);
+            this._pomodoroLabel.visible = this._pomodoroSessionActive;
         }
 
         const showCount = this._shouldShowFocusNotificationCount() &&
@@ -3854,6 +3877,7 @@ export default class DeepWorkModule {
         if (this._pomodoroButton) {
             this._pomodoroButton.destroy();
             this._pomodoroButton = null;
+            this._pomodoroMenuTitle = null;
             this._pomodoroLabel = null;
             this._pomodoroIcon = null;
             this._playPauseItem = null;

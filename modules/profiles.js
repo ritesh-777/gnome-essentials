@@ -356,6 +356,22 @@ export default class ProfilesModule {
         this._pendingScanTimerIds = [];
     }
 
+    _isValidMonitorIndex(index) {
+        if (index === null || index === undefined) return false;
+        try {
+            const displayMonitors = typeof global.display?.get_n_monitors === 'function'
+                ? global.display.get_n_monitors()
+                : 0;
+            const layoutMonitors = Array.isArray(Main.layoutManager?.monitors)
+                ? Main.layoutManager.monitors.length
+                : 0;
+            const numMonitors = Math.max(displayMonitors, layoutMonitors);
+            return index >= 0 && index < numMonitors;
+        } catch (e) {
+            return false;
+        }
+    }
+
     /**
      * Enables the Workspace Restorer, connecting window monitoring signals, GSettings listeners,
      * and spawning the top bar workspace profiles dropdown widget.
@@ -1457,6 +1473,7 @@ export default class ProfilesModule {
     _getGTileWorkArea(monitorIndex, workspace = null, settings = null) {
         try {
             const ws = workspace || global.workspace_manager.get_active_workspace();
+            if (!this._isValidMonitorIndex(monitorIndex)) return null;
             const source = ws?.get_work_area_for_monitor?.(monitorIndex);
             if (!source) return null;
 
@@ -2844,7 +2861,10 @@ export default class ProfilesModule {
             const tiledRect = placement.tiled_rect || placement.frame_rect || config.rect;
             const frameRect = placement.frame_rect || config.rect;
             const rect = new TilingAssistantCompatRect(tiledRect, frameRect);
-            const monitor = config.monitor ?? (typeof win.get_monitor === 'function' ? win.get_monitor() : null);
+            let monitor = config.monitor ?? (typeof win.get_monitor === 'function' ? win.get_monitor() : null);
+            if (monitor !== null && !this._isValidMonitorIndex(monitor)) {
+                monitor = typeof win.get_monitor === 'function' ? win.get_monitor() : 0;
+            }
             const result = twm.tile(win, rect, {
                 openTilingPopup: false,
                 ignoreTA: false,
@@ -2877,7 +2897,13 @@ export default class ProfilesModule {
             if (!settings) return false;
             if (typeof win.move_resize_frame !== 'function') return false;
 
-            const monitorIndex = config.monitor ?? (typeof win.get_monitor === 'function' ? win.get_monitor() : 0);
+            let monitorIndex = config.monitor ?? (typeof win.get_monitor === 'function' ? win.get_monitor() : 0);
+            if (!this._isValidMonitorIndex(monitorIndex)) {
+                monitorIndex = typeof win.get_monitor === 'function' ? win.get_monitor() : 0;
+            }
+            if (!this._isValidMonitorIndex(monitorIndex)) {
+                monitorIndex = 0;
+            }
             const workspace = config.workspace !== null && config.workspace !== undefined
                 ? global.workspace_manager.get_workspace_by_index(config.workspace)
                 : win.get_workspace?.();
@@ -3048,6 +3074,7 @@ export default class ProfilesModule {
 
             if (config.monitor !== null &&
                 config.monitor !== undefined &&
+                this._isValidMonitorIndex(config.monitor) &&
                 typeof win.get_monitor === 'function' &&
                 typeof win.move_to_monitor === 'function' &&
                 win.get_monitor() !== config.monitor) {
