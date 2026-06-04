@@ -27,34 +27,54 @@ The result is a set of desktop utilities that feel connected instead of bolted o
 graph TD
     classDef default fill:#1e1e24,stroke:#3a3a4a,color:#e0e0e0,stroke-width:1px;
     classDef highlight fill:#283a5e,stroke:#4a6fa5,color:#ffffff,stroke-width:1px;
+    classDef utility fill:#2b1e3a,stroke:#5c3a7a,color:#e8d7ff,stroke-width:1px;
 
     %% Modules
     Orchestrator[Core Orchestrator]:::highlight
+    
+    %% Focus Subsystem
     DeepWork[Deep Work Focus]
     Pomodoro[Pomodoro Timer]
     FloatingChip[Floating Timer Chip]
+    
+    %% Session Subsystem
     Profiles[Workspace Profiles]
     SafetySnap[Safety Snapshots]
     Tiling[Tiling-Aware Engine]
+    
+    %% Launcher/Shelf Subsystem
     Launcher[Essential Menu]
     Shelf[Essential Shelf]
     Uninstaller[App Uninstaller]
+    
+    %% Ambient Subsystem
+    Battery[Battery Health Sound]:::utility
 
-    %% Coordination lines
+    %% Orchestration Paths
     Orchestrator <--> DeepWork
     Orchestrator <--> Profiles
     Orchestrator <--> Launcher
+    Orchestrator <--> Battery
 
-    %% Internal module relationships
+    %% Focus Flow
     DeepWork <--> Pomodoro
-    Pomodoro --> FloatingChip
-    DeepWork --> FloatingChip
+    Pomodoro -->|Spawns overlay| FloatingChip
+    DeepWork -->|Controls layout| FloatingChip
+    
+    %% Session Flow
     Profiles <--> SafetySnap
-    Profiles --> Tiling
+    Profiles -->|Arranges| Tiling
+
+    %% Menu & Action Flow
     Launcher <--> Shelf
-    Launcher -.-> Profiles
-    Uninstaller --> Launcher
+    Uninstaller -->|Integrated search action| Launcher
+    Uninstaller -->|Right-click context action| AppGrid[GNOME App Grid]
+    
+    %% Cross-System Bridges
+    Shelf <-->|Capture & Restore Contexts| Profiles
 ```
+
+
 
 
 ## A Fair Word About Existing Extensions
