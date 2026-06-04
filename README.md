@@ -46,6 +46,7 @@ graph TD
     Launcher[Essential Menu]
     Shelf[Essential Shelf]
     Uninstaller[App Uninstaller]
+    CliCreator[CLI App Creator]:::utility
     
     %% Ambient Subsystem
     Battery[Battery Health Sound]:::utility
@@ -69,6 +70,10 @@ graph TD
     Launcher <--> Shelf
     Uninstaller -->|Integrated search action| Launcher
     Uninstaller -->|Right-click context action| AppGrid[GNOME App Grid]
+    
+    %% CLI Creator Flow
+    CliCreator -->|Registers launchers| AppGrid
+    Uninstaller -.->|Removes custom launchers| CliCreator
     
     %% Cross-System Bridges
     Shelf <-->|Capture & Restore Contexts| Profiles
@@ -101,6 +106,7 @@ That is the promise of the project: not novelty for its own sake, but less frict
 - Essential Shelf for explicitly keeping temporary files, folders, links, and small snippets nearby.
 - Battery Health Sound reminders for healthy charging and low-battery moments.
 - App uninstall shortcuts in the GNOME app grid and, optionally, inside Essential Menu.
+- CLI Application Creator to turn any terminal command or utility into a native launcher with theme-aware or custom icons.
 - A clean Libadwaita settings window that keeps each feature discoverable.
 
 ## At a Glance
@@ -114,6 +120,7 @@ That is the promise of the project: not novelty for its own sake, but less frict
 | Essential Shelf | Keeps selected files, folders, links, and snippets available from the launcher, with file previews when GNOME can provide them |
 | Battery Health Sound | Plays useful battery threshold reminders through the desktop sound theme |
 | App Uninstallation Utility | Adds convenient uninstall actions for installed applications |
+| CLI Application Creator | Wraps terminal tools into desktop apps with theme-aware or custom icons |
 
 ## Compatibility
 
@@ -534,6 +541,18 @@ It tries to identify whether an app is:
 Depending on the type, removal may use Flatpak, Snap, or the system package manager. Native package removal can require authentication through `pkexec`.
 
 This feature should be used with care. It is a convenience layer over real uninstall operations, not a toy action.
+
+### CLI Application Creator
+
+Many power users and developers rely on terminal-based tools (like `lazygit`, `htop`, `btop`, or `agy`) for their daily work. However, launching them usually requires opening a terminal window, remembering the command, and typing it manually.
+
+The CLI Application Creator turns any terminal command or script into a **first-class native desktop application launcher** directly from your settings panel.
+
+Key capabilities:
+- **Theme-Aware & Custom Icons**: The creator automatically searches your active icon theme for a matching icon (based on the command or application name). If not found, it falls back to a standard terminal launcher icon. You can also specify any custom icon name or absolute path manually.
+- **Persistent Output Terminal**: The launcher configures the command to run in your default system terminal and inserts an auto-keep-open instruction (`exec bash`), ensuring that output text doesn't disappear when the command finishes execution.
+- **Immediate Integration**: Spawns the desktop launcher instantly without requiring a Shell reload or admin authentication (`pkexec`). The generated app immediately appears in your GNOME App Grid search, launcher, and can be pinned to your **Essential Shelf**.
+- **Self-Healing File Management**: Created apps are listed inside the settings page, allowing you to edit their properties (name, command, icon) or delete them and their generated assets cleanly with a single click.
 
 ## Settings Window
 

@@ -1289,6 +1289,418 @@ fi
         connectSetting('changed::tweaks-essential-uninstall-enabled', updateUninstallUtilitySensitivity);
         connectSetting('changed::tweaks-essential-menu-enabled', updateUninstallUtilitySensitivity);
 
+        // --- Group: CLI Application Creator ---
+        const cliAppCreatorGroup = new Adw.PreferencesGroup({
+            title: 'CLI Application Creator',
+            description: 'Turn any terminal tool or CLI command into a native desktop app launcher.'
+        });
+        tweaksPage.add(cliAppCreatorGroup);
+
+        const cmdEntryRow = new Adw.EntryRow({
+            title: 'Executable Command'
+        });
+        if ('placeholder_text' in cmdEntryRow) {
+            cmdEntryRow.placeholder_text = 'e.g., lazygit, htop, btop, agy';
+        }
+        cliAppCreatorGroup.add(cmdEntryRow);
+
+        const nameEntryRow = new Adw.EntryRow({
+            title: 'Application Name'
+        });
+        if ('placeholder_text' in nameEntryRow) {
+            nameEntryRow.placeholder_text = 'e.g., LazyGit, H-Top, B-Top';
+        }
+        cliAppCreatorGroup.add(nameEntryRow);
+
+        const iconEntryRow = new Adw.EntryRow({
+            title: 'Icon Name or Path (Optional)'
+        });
+        if ('placeholder_text' in iconEntryRow) {
+            iconEntryRow.placeholder_text = 'e.g., gemini, utilities-terminal, or absolute path';
+        }
+        cliAppCreatorGroup.add(iconEntryRow);
+
+        const createActionRow = new Adw.ActionRow({
+            title: 'Create Desktop Launcher',
+            subtitle: 'Creates a custom vector icon and registers the app with your system launcher.'
+        });
+        const createButton = new Gtk.Button({
+            label: 'Create App',
+            valign: Gtk.Align.CENTER
+        });
+        createButton.add_css_class('suggested-action');
+        createButton.add_css_class('pill');
+        createActionRow.add_suffix(createButton);
+
+        let editingFilename = null;
+        let editingOldIconName = null;
+
+        const cancelEditButton = new Gtk.Button({
+            label: 'Cancel',
+            valign: Gtk.Align.CENTER,
+            visible: false
+        });
+        cancelEditButton.add_css_class('flat');
+        cancelEditButton.add_css_class('pill');
+        cancelEditButton.connect('clicked', () => {
+            cmdEntryRow.set_text('');
+            nameEntryRow.set_text('');
+            iconEntryRow.set_text('');
+            
+            editingFilename = null;
+            editingOldIconName = null;
+            createButton.label = 'Create App';
+            cancelEditButton.set_visible(false);
+        });
+        createActionRow.add_suffix(cancelEditButton);
+
+        cliAppCreatorGroup.add(createActionRow);
+
+        const cliAppListGroup = new Adw.PreferencesGroup({
+            title: 'Created CLI Applications',
+            description: 'The following custom CLI launchers are currently registered.'
+        });
+        tweaksPage.add(cliAppListGroup);
+
+        const cliAppListContainer = new Gtk.ListBox({
+            selection_mode: Gtk.SelectionMode.NONE
+        });
+        cliAppListContainer.add_css_class('boxed-list');
+        cliAppListGroup.add(cliAppListContainer);
+
+
+        const applicationsDir = GLib.build_filenamev([GLib.get_user_data_dir(), 'applications']);
+        const iconsDir = GLib.build_filenamev([GLib.get_user_data_dir(), 'icons', 'hicolor', 'scalable', 'apps']);
+
+        const listLaunchers = () => {
+            return new Promise((resolve) => {
+                const dir = Gio.File.new_for_path(applicationsDir);
+                if (!dir.query_exists(null)) {
+                    resolve([]);
+                    return;
+                }
+                
+                dir.enumerate_children_async(
+                    'standard::name,standard::type',
+                    Gio.FileQueryInfoFlags.NONE,
+                    GLib.PRIORITY_DEFAULT,
+                    null,
+                    (obj, res) => {
+                        try {
+                            const enumerator = obj.enumerate_children_finish(res);
+                            const files = [];
+                            let info;
+                            while ((info = enumerator.next_file(null))) {
+                                const name = info.get_name();
+                                if (name.startsWith('gnome-essentials-cli-') && name.endsWith('.desktop')) {
+                                    files.push(name);
+                                }
+                            }
+                            enumerator.close(null);
+                            
+                            const results = [];
+                            for (const filename of files) {
+                                try {
+                                    const filePath = GLib.build_filenamev([applicationsDir, filename]);
+                                    const file = Gio.File.new_for_path(filePath);
+                                    const [, contents] = file.load_contents(null);
+                                    
+                                    let text;
+                                    if (typeof TextDecoder !== 'undefined') {
+                                        text = new TextDecoder('utf-8').decode(contents);
+                                    } else {
+                                        text = imports.byteArray.toString(contents);
+                                    }
+                                    
+                                    const lines = text.split('\n');
+                                    let displayName = '', exec = '', icon = '';
+                                    for (let line of lines) {
+                                        if (line.startsWith('Name=')) displayName = line.substring(5).trim();
+                                        if (line.startsWith('Exec=')) exec = line.substring(5).trim();
+                                        if (line.startsWith('Icon=')) icon = line.substring(5).trim();
+                                    }
+                                    
+                                    let command = exec;
+                                    const execMatch = exec.match(/bash -c\s+"([^;]+);/);
+                                    if (execMatch) {
+                                        command = execMatch[1].trim();
+                                    }
+                                    
+                                    results.push({
+                                        filename,
+                                        displayName,
+                                        command,
+                                        iconName: icon
+                                    });
+                                } catch (e) {
+                                    console.error('Failed to parse desktop file ' + filename + ': ' + e.message);
+                                }
+                            }
+                            resolve(results);
+                        } catch (e) {
+                            resolve([]);
+                        }
+                    }
+                );
+            });
+        };
+
+        const createLauncher = async (cmd, name, iconInput) => {
+            cmd = cmd.trim();
+            name = name.trim();
+            iconInput = (iconInput || '').trim();
+            if (cmd.length === 0 || name.length === 0) {
+                throw new Error('Command and name cannot be empty.');
+            }
+            
+            // Resolve the executable token, skipping any environment variables
+            const parts = cmd.split(/\s+/);
+            let exeToken = '';
+            for (const part of parts) {
+                if (part.includes('=')) {
+                    continue;
+                }
+                exeToken = part;
+                break;
+            }
+
+            if (!exeToken) {
+                throw new Error('No executable command found.');
+            }
+
+            // Expand home tilde prefix (~/)
+            let checkPath = exeToken;
+            if (checkPath.startsWith('~/')) {
+                checkPath = GLib.build_filenamev([GLib.get_home_dir(), checkPath.substring(2)]);
+            }
+
+            // Query existence (either absolutely or via PATH)
+            let exists = false;
+            if (GLib.path_is_absolute(checkPath)) {
+                exists = Gio.File.new_for_path(checkPath).query_exists(null);
+            } else {
+                exists = !!GLib.find_program_in_path(checkPath);
+            }
+
+            if (!exists) {
+                throw new Error(`Executable "${exeToken}" not found on your system.`);
+            }
+
+            const cleanCmd = cmd.replace(/[^a-zA-Z0-9_-]/g, '_').toLowerCase();
+            const desktopFilename = `gnome-essentials-cli-${cleanCmd}.desktop`;
+            const desktopPath = GLib.build_filenamev([applicationsDir, desktopFilename]);
+
+            const appsFile = Gio.File.new_for_path(applicationsDir);
+            if (!appsFile.query_exists(null)) {
+                appsFile.make_directory_with_parents(null);
+            }
+
+            let finalIconName = '';
+
+            if (iconInput.length > 0) {
+                finalIconName = iconInput;
+            } else {
+                const cmdExe = GLib.path_get_basename(exeToken).toLowerCase();
+                const display = Gdk.Display.get_default();
+                const theme = Gtk.IconTheme.get_for_display(display);
+
+                if (theme.has_icon(cmdExe)) {
+                    finalIconName = cmdExe;
+                } else if (theme.has_icon(name.toLowerCase())) {
+                    finalIconName = name.toLowerCase();
+                } else {
+                    finalIconName = 'utilities-terminal';
+                }
+            }
+
+            const userShell = GLib.getenv('SHELL') || 'bash';
+            const desktopContent = `[Desktop Entry]
+Type=Application
+Version=1.0
+Name=${name}
+Comment=CLI tool launched via GNOME Essentials
+Icon=${finalIconName}
+Exec=${userShell} -c "${cmd}; exec ${userShell}"
+Terminal=true
+Categories=Utility;Development;
+`;
+
+            const desktopFile = Gio.File.new_for_path(desktopPath);
+            const desktopBytes = new GLib.Bytes(
+                typeof TextEncoder !== 'undefined'
+                    ? new TextEncoder().encode(desktopContent)
+                    : imports.byteArray.fromString(desktopContent)
+            );
+            await new Promise((resolve, reject) => {
+                desktopFile.replace_contents_async(
+                    desktopBytes,
+                    null,
+                    false,
+                    Gio.FileCreateFlags.REPLACE_DESTINATION,
+                    null,
+                    (f, res) => {
+                        try {
+                            f.replace_contents_finish(res);
+                            resolve();
+                        } catch (e) {
+                            reject(e);
+                        }
+                    }
+                );
+            });
+
+            try {
+                const proc = Gio.Subprocess.new(
+                    ['update-desktop-database', applicationsDir],
+                    Gio.SubprocessFlags.NONE
+                );
+                proc.wait_async(null, null);
+            } catch (e) {
+                console.error('Failed to run update-desktop-database: ' + e.message);
+            }
+        };
+
+        const removeLauncher = async (filename, iconName) => {
+            const desktopPath = GLib.build_filenamev([applicationsDir, filename]);
+            
+            try {
+                const dFile = Gio.File.new_for_path(desktopPath);
+                if (dFile.query_exists(null)) {
+                    dFile.delete(null);
+                }
+            } catch (e) {
+                console.error('Failed to delete desktop file: ' + e.message);
+            }
+            
+            if (iconName && iconName.startsWith('gnome-essentials-cli-')) {
+                const iconPath = GLib.build_filenamev([iconsDir, `${iconName}.svg`]);
+                try {
+                    const iFile = Gio.File.new_for_path(iconPath);
+                    if (iFile.query_exists(null)) {
+                        iFile.delete(null);
+                    }
+                } catch (e) {
+                    console.error('Failed to delete icon file: ' + e.message);
+                }
+            }
+            
+            try {
+                const proc = Gio.Subprocess.new(
+                    ['update-desktop-database', applicationsDir],
+                    Gio.SubprocessFlags.NONE
+                );
+                proc.wait_async(null, null);
+            } catch (e) {
+                console.error('Failed to run update-desktop-database: ' + e.message);
+            }
+        };
+
+        const rebuildLauncherList = () => {
+            let child;
+            while ((child = cliAppListContainer.get_first_child())) {
+                cliAppListContainer.remove(child);
+            }
+
+            listLaunchers().then(launchers => {
+                if (launchers.length === 0) {
+                    const noAppsRow = new Adw.ActionRow({
+                        title: 'No custom CLI apps created yet',
+                        subtitle: 'Use the form above to turn any CLI tool into a desktop app launcher.'
+                    });
+                    cliAppListContainer.append(noAppsRow);
+                } else {
+                    for (const app of launchers) {
+                        const row = new Adw.ActionRow({
+                            title: app.displayName,
+                            subtitle: `Runs command: "${app.command}"`
+                        });
+
+                        const rowIcon = new Gtk.Image({
+                            icon_name: app.iconName,
+                            pixel_size: 24,
+                            valign: Gtk.Align.CENTER
+                        });
+                        row.add_prefix(rowIcon);
+
+                        const deleteBtn = new Gtk.Button({
+                            icon_name: 'user-trash-symbolic',
+                            valign: Gtk.Align.CENTER,
+                            tooltip_text: 'Remove Launcher'
+                        });
+                        deleteBtn.add_css_class('flat');
+                        deleteBtn.connect('clicked', () => {
+                            if (editingFilename === app.filename) {
+                                cancelEditButton.emit('clicked');
+                            }
+                            removeLauncher(app.filename, app.iconName).then(() => {
+                                rebuildLauncherList();
+                            });
+                        });
+
+                        const editBtn = new Gtk.Button({
+                            icon_name: 'document-edit-symbolic',
+                            valign: Gtk.Align.CENTER,
+                            tooltip_text: 'Edit Launcher'
+                        });
+                        editBtn.add_css_class('flat');
+                        editBtn.connect('clicked', () => {
+                            editingFilename = app.filename;
+                            editingOldIconName = app.iconName;
+                            cmdEntryRow.set_text(app.command);
+                            nameEntryRow.set_text(app.displayName);
+                            iconEntryRow.set_text(app.iconName === 'utilities-terminal' ? '' : app.iconName);
+                            createButton.label = 'Update App';
+                            cancelEditButton.set_visible(true);
+                            cmdEntryRow.grab_focus();
+                        });
+
+                        row.add_suffix(editBtn);
+                        row.add_suffix(deleteBtn);
+
+                        cliAppListContainer.append(row);
+                    }
+                }
+            });
+        };
+
+        rebuildLauncherList();
+
+        createButton.connect('clicked', () => {
+            const cmd = cmdEntryRow.get_text();
+            const name = nameEntryRow.get_text();
+            const icon = iconEntryRow.get_text();
+            
+            createButton.set_sensitive(false);
+            
+            const actionPromise = editingFilename
+                ? removeLauncher(editingFilename, editingOldIconName).then(() => createLauncher(cmd, name, icon))
+                : createLauncher(cmd, name, icon);
+            
+            actionPromise
+                .then(() => {
+                    cmdEntryRow.set_text('');
+                    nameEntryRow.set_text('');
+                    iconEntryRow.set_text('');
+                    
+                    editingFilename = null;
+                    editingOldIconName = null;
+                    createButton.label = 'Create App';
+                    cancelEditButton.set_visible(false);
+
+                    createButton.set_sensitive(true);
+                    rebuildLauncherList();
+                })
+                .catch(err => {
+                    createButton.set_sensitive(true);
+                    console.error('Failed to save launcher: ' + err.message);
+                    if (typeof window.add_toast === 'function') {
+                        window.add_toast(new Adw.Toast({
+                            title: 'Error: ' + err.message
+                        }));
+                    }
+                });
+        });
+
 
         // ========================================================
         // PAGE 3: 🎛️ WORKSPACE PROFILES (ACTIVE MODULE)
