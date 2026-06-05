@@ -21,6 +21,9 @@ const POMODORO_REST_MINUTES_MIN = 5;
 const POMODORO_REST_MINUTES_MAX = 180;
 const POMODORO_FLOATING_POSITION_UNSET = -1.0;
 const POMODORO_CLOCK_CHECK_SECONDS = 15;
+const AMBIENT_DARKENING_SCALE_MAX = 10.0;
+const AMBIENT_DIM_DEFAULT_DARKENING = 0.82;
+const AMBIENT_BLUR_DEFAULT_DARKENING = 0.15;
 
 function log(msg) {
     if (DEBUG) console.log('[GnomeEssentials][DeepWork] ' + msg);
@@ -51,6 +54,7 @@ export default class DeepWorkModule {
         this._settings = extensionContext.getSettings();
         this._notificationSettings = new Gio.Settings({ schema_id: 'org.gnome.desktop.notifications' });
         
+        this._enabled = false;
         this._active = false;
         
         // Cache original values to restore them exactly
@@ -127,6 +131,7 @@ export default class DeepWorkModule {
         this._floatingPomodoroChromeTracked = false;
         this._floatingPomodoroChromePlacement = null;
         this._floatingPomodoroRaiseTimerId = 0;
+        this._recreatingFloatingPanel = false;
         this._ambientTimerId = 0;
         this._ambientOverlay = null;
         this._ambientOverlayMode = null;
@@ -146,6 +151,7 @@ export default class DeepWorkModule {
      */
     enable() {
         log('Enabling Deep Work module...');
+        this._enabled = true;
         this._active = false;
 
         // Connect signals for focus shifts & dynamic dimming. They are cheap
@@ -169,7 +175,9 @@ export default class DeepWorkModule {
         bindKey('deepwork-ambient-dim', () => this._applyFocusConfigurations());
         bindKey('deepwork-ambient-color', () => this._applyFocusConfigurations());
         bindKey('deepwork-ambient-dim-opacity', () => this._applyFocusConfigurations());
+        bindKey('deepwork-ambient-dim-darkening-intensity', () => this._applyFocusConfigurations());
         bindKey('deepwork-ambient-blur-intensity', () => this._applyFocusConfigurations());
+        bindKey('deepwork-ambient-blur-darkening-intensity', () => this._applyFocusConfigurations());
         bindKey('deepwork-true-ambient-opacity', () => this._applyFocusConfigurations());
         bindKey('deepwork-ambient-dim-level3', () => this._applyFocusConfigurations());
         bindKey('deepwork-ambient-blur-level3', () => this._applyFocusConfigurations());
@@ -226,6 +234,7 @@ export default class DeepWorkModule {
 
     disable() {
         log('Disabling Deep Work module...');
+        this._enabled = false;
 
         this._unregisterFloatingEssentialMenuDropActor();
         global.gnome_essentials_deepwork = null;
@@ -545,6 +554,7 @@ export default class DeepWorkModule {
         this._stopPanelRevealRefresh();
 
         GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+            if (!this._enabled) return GLib.SOURCE_REMOVE;
             if (this._shouldKeepPanelRevealed()) {
                 this._forcePanelActorsVisible();
                 this._queuePanelWorkAreaRefresh();
@@ -555,6 +565,7 @@ export default class DeepWorkModule {
 
         this._panelRevealRefreshTimerId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 120, () => {
             this._panelRevealRefreshTimerId = 0;
+            if (!this._enabled) return GLib.SOURCE_REMOVE;
             if (this._shouldKeepPanelRevealed()) {
                 this._forcePanelActorsVisible();
                 this._queuePanelWorkAreaRefresh();
@@ -624,6 +635,7 @@ export default class DeepWorkModule {
             }
 
             GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+                if (!this._enabled) return GLib.SOURCE_REMOVE;
                 try {
                     if (typeof layoutManager?._queueUpdateRegions === 'function') {
                         layoutManager._queueUpdateRegions();
@@ -647,7 +659,7 @@ export default class DeepWorkModule {
         this._postOverviewPanelReconcileTimerId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 160, () => {
             attempts++;
 
-            if (!this._active || !this._shouldHidePanelOnDesktop()) {
+            if (!this._enabled || !this._active || !this._shouldHidePanelOnDesktop()) {
                 this._postOverviewPanelReconcileTimerId = 0;
                 return GLib.SOURCE_REMOVE;
             }
@@ -712,6 +724,57 @@ export default class DeepWorkModule {
         return spaces;
     }
 
+    _getSafeMetaWindow(actor) {
+        try {
+            if (!actor || actor.destroyed) return null;
+            if (typeof actor.is_destroyed === 'function' && actor.is_destroyed()) return null;
+            return actor.get_meta_window?.() || actor.meta_window || null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    _getWindowActorsSafe() {
+        try {
+            return global.get_window_actors();
+        } catch (e) {
+            return [];
+        }
+    }
+
+    _isWindowReadyForPaperWMLayout(win) {
+        try {
+            if (!win || win.get_window_type() !== Meta.WindowType.NORMAL) return false;
+            if (typeof win.get_compositor_private !== 'function') return true;
+
+            const actor = win.get_compositor_private();
+            if (!actor) return false;
+            if (actor.destroyed) return false;
+            if (typeof actor.is_destroyed === 'function' && actor.is_destroyed()) return false;
+
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    _isPaperWMSpaceReadyForLayout(space) {
+        try {
+            if (!space || typeof space[Symbol.iterator] !== 'function') return false;
+
+            for (const column of space) {
+                if (!Array.isArray(column)) continue;
+                for (const win of column) {
+                    if (win && !this._isWindowReadyForPaperWMLayout(win)) return false;
+                }
+            }
+
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
     _getPaperWMTopWorkAreaOffset(space) {
         try {
             const monitor = space?.monitor;
@@ -728,14 +791,21 @@ export default class DeepWorkModule {
 
     _layoutPaperWMSpace(space) {
         try {
+            if (!this._isPaperWMSpaceReadyForLayout(space)) {
+                log('PaperWM: skipping panel bridge layout while a window actor is not ready.');
+                return false;
+            }
+
             if (typeof space?.setSpaceTopbarElementsVisible === 'function') {
                 space.setSpaceTopbarElementsVisible(space.showTopBar);
             }
             if (typeof space?.layout === 'function') {
                 space.layout(false, { ensure: false, centerIfOne: false });
             }
+            return true;
         } catch (e) {
             // PaperWM may be in the middle of an overview transition.
+            return false;
         }
     }
 
@@ -759,6 +829,10 @@ export default class DeepWorkModule {
                 previousState.desiredShowTopBar !== desiredShowTopBar;
             let needsLayout = bridgeStateChanged;
 
+            if (needsLayout && !this._isPaperWMSpaceReadyForLayout(space)) {
+                continue;
+            }
+
             if (space.showTopBar !== desiredShowTopBar) {
                 log(`PaperWM: ${hidden ? 'adjusting' : 'restoring'} showTopBar for panel work-area bridge (${space.showTopBar} -> ${desiredShowTopBar})`);
                 space.showTopBar = desiredShowTopBar;
@@ -766,12 +840,13 @@ export default class DeepWorkModule {
             }
 
             if (needsLayout) {
-                this._layoutPaperWMSpace(space);
-                this._paperWMBridgeLastState.set(space, {
-                    hidden,
-                    topOffset,
-                    desiredShowTopBar
-                });
+                if (this._layoutPaperWMSpace(space)) {
+                    this._paperWMBridgeLastState.set(space, {
+                        hidden,
+                        topOffset,
+                        desiredShowTopBar
+                    });
+                }
             }
         }
     }
@@ -920,6 +995,10 @@ export default class DeepWorkModule {
         if (this._overviewPanelHideTimerId > 0) return;
 
         this._overviewPanelHideTimerId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 100, () => {
+            if (!this._enabled) {
+                this._overviewPanelHideTimerId = 0;
+                return GLib.SOURCE_REMOVE;
+            }
             if (!this._shouldHidePanelInOverview() || !Main.overview.visible) {
                 this._overviewPanelHideTimerId = 0;
                 if (this._shouldHidePanelOnDesktop()) {
@@ -1137,7 +1216,7 @@ export default class DeepWorkModule {
         if (this._notificationSuppressionTimerId > 0) return;
 
         this._notificationSuppressionTimerId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 100, () => {
-            if (!this._active || !this._settings.get_boolean('deepwork-mute-notifications')) {
+            if (!this._enabled || !this._active || !this._settings.get_boolean('deepwork-mute-notifications')) {
                 this._notificationSuppressionTimerId = 0;
                 this._suppressMessageTrayBanners(false);
                 return GLib.SOURCE_REMOVE;
@@ -1361,7 +1440,7 @@ export default class DeepWorkModule {
 
         const snoozeLevel = this._getSnoozeLevel();
         const ambientDim = this._settings.get_boolean('deepwork-ambient-dim');
-        const actors = global.get_window_actors();
+        const actors = this._getWindowActorsSafe();
         const focused = this._getFocusedWindowInfo();
         const focusedWindow = focused.window;
         const focusedActor = focused.actor || this._findWindowActor(actors, focusedWindow);
@@ -1395,6 +1474,7 @@ export default class DeepWorkModule {
 
         this._ambientDimmingRefreshTimerId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, delayMs, () => {
             this._ambientDimmingRefreshTimerId = 0;
+            if (!this._enabled) return GLib.SOURCE_REMOVE;
             this._applyAmbientDimming();
             return GLib.SOURCE_REMOVE;
         });
@@ -1415,7 +1495,8 @@ export default class DeepWorkModule {
         if (this._ambientFocusPollerId > 0) return;
 
         this._ambientFocusPollerId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 300, () => {
-            if (!this._active ||
+            if (!this._enabled ||
+                !this._active ||
                 this._getSnoozeLevel() < 2 ||
                 !this._settings.get_boolean('deepwork-ambient-dim')) {
                 this._ambientFocusPollerId = 0;
@@ -1438,21 +1519,77 @@ export default class DeepWorkModule {
         }
     }
 
+    _getAmbientDarkeningStrength(key, fallbackStrength = 1.0) {
+        const fallbackValue = clamp(
+            Number.isFinite(Number(fallbackStrength)) ? Number(fallbackStrength) : 1.0,
+            0.0,
+            1.0
+        );
+
+        try {
+            const value = Number(this._settings.get_double(key));
+            const normalized = Number.isFinite(value)
+                ? value
+                : fallbackValue * AMBIENT_DARKENING_SCALE_MAX;
+            return clamp(normalized, 0.0, AMBIENT_DARKENING_SCALE_MAX) / AMBIENT_DARKENING_SCALE_MAX;
+        } catch (e) {
+            return fallbackValue;
+        }
+    }
+
+    _getDimmedWindowOpacity(dimOpacityVal) {
+        const value = Number(dimOpacityVal);
+        const opacity = clamp(Number.isFinite(value) ? value : 0.0, 0.0, 1.0);
+        const strength = this._getAmbientDarkeningStrength(
+            'deepwork-ambient-dim-darkening-intensity',
+            AMBIENT_DIM_DEFAULT_DARKENING
+        );
+        return Math.round(255 - ((1.0 - opacity) * strength * 255));
+    }
+
+    _getBlurBrightness() {
+        const strength = this._getAmbientDarkeningStrength(
+            'deepwork-ambient-blur-darkening-intensity',
+            AMBIENT_BLUR_DEFAULT_DARKENING
+        );
+        return clamp(1.0 - strength, 0.0, 1.0);
+    }
+
+    _syncBlurBrightness(effect, brightness) {
+        if (!effect) return;
+
+        const value = Number(brightness);
+        const next = clamp(Number.isFinite(value) ? value : 1.0, 0.0, 1.0);
+        if (effect._deepworkBrightness === next) return;
+
+        try {
+            if (typeof effect.set_brightness === 'function') {
+                effect.set_brightness(next);
+            } else {
+                effect.brightness = next;
+            }
+            effect._deepworkBrightness = next;
+        } catch (e) {
+            // Blur brightness is best-effort across Shell versions.
+        }
+    }
+
     _applySoftAmbientDimming(actors, focusedWindow, focusedActor) {
         const dimOpacityVal = this._settings.get_double('deepwork-ambient-dim-opacity');
         const blurIntensity = this._settings.get_double('deepwork-ambient-blur-intensity');
+        const blurBrightness = this._getBlurBrightness();
 
         this._ensureAmbientOverlay('soft');
         this._positionAmbientOverlayBelowFocused(focusedActor);
         this._updateAmbientGradient();
 
         for (const actor of actors) {
-            const win = actor.get_meta_window();
-            if (!win || win.get_window_type() !== Meta.WindowType.NORMAL) continue;
-
             try {
+                const win = this._getSafeMetaWindow(actor);
+                if (!win || win.get_window_type() !== Meta.WindowType.NORMAL) continue;
+
                 if (win !== focusedWindow && actor !== focusedActor) {
-                    const targetOpacity = Math.round(dimOpacityVal * 255);
+                    const targetOpacity = this._getDimmedWindowOpacity(dimOpacityVal);
                     if (actor.get_opacity() !== targetOpacity) {
                         actor.set_opacity(targetOpacity);
                     }
@@ -1462,10 +1599,10 @@ export default class DeepWorkModule {
                             const blurEffect = new Shell.BlurEffect({
                                 mode: Shell.BlurMode.ACTOR
                             });
-                            blurEffect.set_brightness(0.85);
                             actor.add_effect(blurEffect);
                             actor._deepworkBlurEffect = blurEffect;
                         }
+                        this._syncBlurBrightness(actor._deepworkBlurEffect, blurBrightness);
                         let targetSigma = Math.round(Math.pow(blurIntensity, 2) * 25);
                         if (blurIntensity > 0) {
                             targetSigma = Math.max(1, targetSigma);
@@ -1520,15 +1657,16 @@ export default class DeepWorkModule {
         
         const dimOpacityVal = this._settings.get_double('deepwork-ambient-dim-opacity');
         const blurIntensity = this._settings.get_double('deepwork-ambient-blur-intensity');
+        const blurBrightness = this._getBlurBrightness();
         
         for (const actor of actors) {
-            const win = actor.get_meta_window?.();
-            if (!win || win.get_window_type() !== Meta.WindowType.NORMAL) continue;
-            
             try {
+                const win = this._getSafeMetaWindow(actor);
+                if (!win || win.get_window_type() !== Meta.WindowType.NORMAL) continue;
+
                 if (win !== focusedWindow && actor !== focusedActor) {
                     // Stacking and window-level dimming
-                    const targetOpacity = keepDim ? Math.round(dimOpacityVal * 255) : 255;
+                    const targetOpacity = keepDim ? this._getDimmedWindowOpacity(dimOpacityVal) : 255;
                     if (actor.get_opacity() !== targetOpacity) {
                         actor.set_opacity(targetOpacity);
                     }
@@ -1539,10 +1677,10 @@ export default class DeepWorkModule {
                             const blurEffect = new Shell.BlurEffect({
                                 mode: Shell.BlurMode.ACTOR
                             });
-                            blurEffect.set_brightness(0.85);
                             actor.add_effect(blurEffect);
                             actor._deepworkBlurEffect = blurEffect;
                         }
+                        this._syncBlurBrightness(actor._deepworkBlurEffect, blurBrightness);
                         
                         let targetSigma = Math.round(Math.pow(blurIntensity, 2) * 25);
                         if (blurIntensity > 0) {
@@ -1634,7 +1772,7 @@ export default class DeepWorkModule {
             GLib.PRIORITY_DEFAULT,
             150,
             () => {
-                if (this._active && this._ambientOverlay && this._ambientOverlayMode === 'soft') {
+                if (this._enabled && this._active && this._ambientOverlay && this._ambientOverlayMode === 'soft') {
                     if (!Main.overview.visible) {
                         this._ambientAngle = (this._ambientAngle + 1) % 360;
                         this._updateAmbientGradient();
@@ -1692,13 +1830,18 @@ export default class DeepWorkModule {
     _updateAmbientGradient() {
         if (!this._ambientOverlay) return;
         const baseColor = this._settings.get_string('deepwork-ambient-color') || '#0a0d1a';
+        const dimStrength = this._getAmbientDarkeningStrength(
+            'deepwork-ambient-dim-darkening-intensity',
+            AMBIENT_DIM_DEFAULT_DARKENING
+        );
+        const overlayAlpha = Math.round(0xff * dimStrength).toString(16).padStart(2, '0');
         const overlayColor = /^#[0-9a-fA-F]{6}$/.test(baseColor)
-            ? `${baseColor}d0`
+            ? `${baseColor}${overlayAlpha}`
             : baseColor;
         
         // Dynamic duo-gradient rotation: blends the user's custom color with an aesthetic deep indigo
         this._ambientOverlay.set_style(
-            `background: linear-gradient(${this._ambientAngle}deg, ${overlayColor}, #140d24d0);`
+            `background: linear-gradient(${this._ambientAngle}deg, ${overlayColor}, #140d24${overlayAlpha});`
         );
     }
 
@@ -1722,7 +1865,9 @@ export default class DeepWorkModule {
         this._ambientOverlay.set_style(`background-color: rgba(0, 0, 0, ${opacity});`);
     }
 
-    _restoreAmbientWindowEffects(actors = global.get_window_actors()) {
+    _restoreAmbientWindowEffects(actors = null) {
+        actors = actors || this._getWindowActorsSafe();
+
         for (const actor of actors) {
             try {
                 actor.set_opacity(255);
@@ -1765,7 +1910,7 @@ export default class DeepWorkModule {
 
         this._windowCreatedId = global.display.connect('window-created', () => {
             GLib.timeout_add(GLib.PRIORITY_DEFAULT, 100, () => {
-                if (!this._active) return GLib.SOURCE_REMOVE;
+                if (!this._enabled || !this._active) return GLib.SOURCE_REMOVE;
                 this._queueAmbientDimmingRefresh();
                 this._queueFloatingPomodoroRaise();
                 return GLib.SOURCE_REMOVE;
@@ -2748,6 +2893,7 @@ export default class DeepWorkModule {
         this._stopFloatingPomodoroRaiseTimer();
         this._floatingPomodoroRaiseTimerId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 160, () => {
             this._floatingPomodoroRaiseTimerId = 0;
+            if (!this._enabled) return GLib.SOURCE_REMOVE;
             if (this._floatingPomodoroActor?.visible) {
                 this._raiseFloatingPomodoro();
             }
@@ -3047,6 +3193,7 @@ export default class DeepWorkModule {
             this._getPanelPeekDurationSeconds() * 1000,
             () => {
                 this._panelPeekTimerId = 0;
+                if (!this._enabled) return GLib.SOURCE_REMOVE;
                 this._cancelPanelPeek(true);
                 return GLib.SOURCE_REMOVE;
             }
@@ -3264,7 +3411,7 @@ export default class DeepWorkModule {
             GLib.PRIORITY_DEFAULT,
             POMODORO_CLOCK_CHECK_SECONDS,
             () => {
-                if (!this._pomodoroButton || !this._settings.get_boolean('deepwork-pomodoro-clock-enabled')) {
+                if (!this._enabled || !this._pomodoroButton || !this._settings.get_boolean('deepwork-pomodoro-clock-enabled')) {
                     this._pomodoroClockTimerId = 0;
                     return GLib.SOURCE_REMOVE;
                 }
@@ -3544,6 +3691,7 @@ export default class DeepWorkModule {
             3,
             () => {
                 this._focusNotificationSummaryTimerId = 0;
+                if (!this._enabled) return GLib.SOURCE_REMOVE;
                 Main.notify(
                     'Focus Notification Summary',
                     `${summary.count} notification${summary.count === 1 ? '' : 's'} arrived while banners were silenced. Check the notification center.`
@@ -3625,7 +3773,7 @@ export default class DeepWorkModule {
             GLib.PRIORITY_DEFAULT,
             1000,
             () => {
-                if (!this._pomodoroButton || !this._isPomodoroControllerEnabled()) {
+                if (!this._enabled || !this._pomodoroButton || !this._isPomodoroControllerEnabled()) {
                     this._pomodoroTimer = null;
                     return GLib.SOURCE_REMOVE;
                 }
@@ -3750,6 +3898,11 @@ export default class DeepWorkModule {
         }
         if (this._floatingPomodoroCountBadge) {
             this._floatingPomodoroCountBadge.set_label(this._focusNotificationCount.toString());
+            const prevShowCount = this._lastFloatingShowCount ?? false;
+            if (showCount !== prevShowCount) {
+                this._lastFloatingShowCount = showCount;
+                this._updateFloatingPomodoroMiniDotState(true);
+            }
         }
 
         const showTime = this._settings.get_boolean('deepwork-pomodoro-floating-show-time');
@@ -3971,7 +4124,7 @@ export default class DeepWorkModule {
                 GLib.PRIORITY_DEFAULT,
                 10000,
                 () => {
-                    if (!this._floatingPomodoroActor || !this._floatingPomodoroActor.visible) {
+                    if (!this._enabled || !this._floatingPomodoroActor || !this._floatingPomodoroActor.visible) {
                         this._clockTimerId = 0;
                         return GLib.SOURCE_REMOVE;
                     }
@@ -4007,6 +4160,7 @@ export default class DeepWorkModule {
         this._floatingPomodoroClockSeparator = null;
         this._floatingPomodoroClockLabel = null;
         this._floatingPomodoroCountBadge = null;
+        this._lastFloatingShowCount = null;
         this._floatingPomodoroIcon = null;
         this._floatingPomodoroDragHandle = null;
         this._floatingPomodoroPeekIcon = null;
@@ -4055,6 +4209,9 @@ export default class DeepWorkModule {
     }
 
     _animateFloatingPomodoroRecreation(callback) {
+        if (this._recreatingFloatingPanel) return;
+        this._recreatingFloatingPanel = true;
+
         if (this._floatingPomodoroActor && this._floatingPomodoroActor.visible) {
             this._floatingPomodoroActor.set_pivot_point(0.5, 0.5);
             this._floatingPomodoroActor.ease({
@@ -4064,7 +4221,11 @@ export default class DeepWorkModule {
                 duration: 120,
                 mode: Clutter.AnimationMode.EASE_IN_CUBIC,
                 onComplete: () => {
-                    if (typeof callback === 'function') callback();
+                    try {
+                        if (typeof callback === 'function') callback();
+                    } catch (e) {
+                        logError(`Callback error in floating Pomodoro recreation: ${e.message}`);
+                    }
                     this._destroyFloatingPomodoroIndicator();
                     this._createFloatingPomodoroIndicator();
                     this._syncFloatingPomodoroVisibility();
@@ -4079,16 +4240,26 @@ export default class DeepWorkModule {
                             scale_x: 1.0,
                             scale_y: 1.0,
                             duration: 150,
-                            mode: Clutter.AnimationMode.EASE_OUT_CUBIC
+                            mode: Clutter.AnimationMode.EASE_OUT_CUBIC,
+                            onComplete: () => {
+                                this._recreatingFloatingPanel = false;
+                            }
                         });
+                    } else {
+                        this._recreatingFloatingPanel = false;
                     }
                 }
             });
         } else {
-            if (typeof callback === 'function') callback();
+            try {
+                if (typeof callback === 'function') callback();
+            } catch (e) {
+                logError(`Callback error in floating Pomodoro recreation: ${e.message}`);
+            }
             this._destroyFloatingPomodoroIndicator();
             this._createFloatingPomodoroIndicator();
             this._syncFloatingPomodoroVisibility();
+            this._recreatingFloatingPanel = false;
         }
     }
 }

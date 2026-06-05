@@ -6,6 +6,7 @@
 
 import GLib from 'gi://GLib';
 import Gio from 'gi://Gio';
+import GioUnix from 'gi://GioUnix';
 import Shell from 'gi://Shell';
 import Clutter from 'gi://Clutter';
 import Pango from 'gi://Pango';
@@ -16,11 +17,12 @@ import * as ModalDialog from 'resource:///org/gnome/shell/ui/modalDialog.js';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 
-const DEBUG = true;
+const DEBUG = false;
 const MAX_GEOMETRY_VALUE = 100000;
 const MAX_TILE_RATIO = 1000;
 const SAFETY_SNAPSHOT_DEBOUNCE_MS = 1200;
 const SAFETY_SNAPSHOT_INITIAL_DELAY_MS = 1000;
+const CLI_DESKTOP_PREFIXES = ['gnome.essentials.cli.', 'gnome-essentials-cli-'];
 
 function log(msg) {
     if (DEBUG) console.log('[GnomeEssentials][Profiles] ' + msg);
@@ -372,6 +374,95 @@ export default class ProfilesModule {
         }
     }
 
+    _windowHasCompositorActor(win) {
+        try {
+            if (typeof win?.get_compositor_private !== 'function') return true;
+
+            const actor = win.get_compositor_private();
+            if (!actor) return false;
+            if (actor.destroyed) return false;
+            if (typeof actor.is_destroyed === 'function' && actor.is_destroyed()) return false;
+
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    _getSafeMetaWindow(actor) {
+        try {
+            if (!actor || actor.destroyed) return null;
+            if (typeof actor.is_destroyed === 'function' && actor.is_destroyed()) return null;
+            return actor.get_meta_window?.() || actor.meta_window || null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    _windowReadyForNativeOps(win) {
+        return this._isLiveNormalWindow(win) && this._windowHasCompositorActor(win);
+    }
+
+    _moveWindowToMonitorIfNeeded(win, monitorIndex, context = 'restore') {
+        if (!this._windowReadyForNativeOps(win) || !this._isValidMonitorIndex(monitorIndex)) {
+            return false;
+        }
+
+        try {
+            if (typeof win.get_monitor !== 'function' || typeof win.move_to_monitor !== 'function') {
+                return false;
+            }
+
+            const currentMonitor = win.get_monitor();
+            if (!this._isValidMonitorIndex(currentMonitor)) return false;
+            if (currentMonitor === monitorIndex) return true;
+
+            if (!this._windowHasCompositorActor(win)) {
+                log(`Skipping monitor move for ${context}; window actor is not ready.`);
+                return false;
+            }
+
+            win.move_to_monitor(monitorIndex);
+            return true;
+        } catch (e) {
+            logError(`Failed to move window to monitor ${monitorIndex} during ${context}: ${e.message}`);
+            return false;
+        }
+    }
+
+    _isPaperWMSpaceReadyForLayout(space) {
+        try {
+            if (!space || typeof space[Symbol.iterator] !== 'function') return false;
+
+            for (const column of space) {
+                if (!Array.isArray(column)) continue;
+                for (const win of column) {
+                    if (win && !this._windowReadyForNativeOps(win)) return false;
+                }
+            }
+
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    _safePaperWMSpaceLayout(space, options, context = 'PaperWM layout') {
+        if (!this._isPaperWMSpaceReadyForLayout(space)) {
+            log(`Skipping ${context}; PaperWM space contains an unready window.`);
+            return false;
+        }
+
+        try {
+            if (typeof space?.layout !== 'function') return false;
+            space.layout(true, options);
+            return true;
+        } catch (e) {
+            logError(`${context} failed: ${e.message}`);
+            return false;
+        }
+    }
+
     /**
      * Enables the Workspace Restorer, connecting window monitoring signals, GSettings listeners,
      * and spawning the top bar workspace profiles dropdown widget.
@@ -477,7 +568,7 @@ export default class ProfilesModule {
 
             // Wait briefly for window mapping and application metadata association
             GLib.timeout_add(GLib.PRIORITY_DEFAULT, 350, () => {
-                if (this._active && win) {
+                if (this._active && this._windowReadyForNativeOps(win)) {
                     this._restorePendingWindow(win);
                 }
                 return GLib.SOURCE_REMOVE;
@@ -576,7 +667,7 @@ export default class ProfilesModule {
     _trackExistingWindowsForSafetySnapshot() {
         try {
             for (const actor of global.get_window_actors()) {
-                const win = actor.get_meta_window();
+                const win = this._getSafeMetaWindow(actor);
                 this._trackWindowForSafetySnapshot(win);
             }
         } catch (e) {
@@ -1303,6 +1394,74 @@ export default class ProfilesModule {
         }
     }
 
+    _getCliAppIdFromWmClass(wmClass) {
+        const value = String(wmClass ?? '').trim().toLowerCase();
+        if (!value) return '';
+        if (!CLI_DESKTOP_PREFIXES.some(prefix => value.startsWith(prefix))) return '';
+
+        const appId = value.endsWith('.desktop') ? value : `${value}.desktop`;
+        return this._desktopFileExists(appId) ? appId : '';
+    }
+
+    _desktopFileExists(appId) {
+        const fileName = String(appId ?? '').endsWith('.desktop') ? appId : `${appId}.desktop`;
+        const appDirs = [
+            GLib.build_filenamev([GLib.get_user_data_dir(), 'applications']),
+            ...GLib.get_system_data_dirs().map(dir => GLib.build_filenamev([dir, 'applications']))
+        ];
+
+        return appDirs.some(dir => Gio.File.new_for_path(GLib.build_filenamev([dir, fileName])).query_exists(null));
+    }
+
+    _loadDesktopAppInfo(appId) {
+        try {
+            const fileName = String(appId ?? '').endsWith('.desktop') ? appId : `${appId}.desktop`;
+            const desktopPath = GLib.build_filenamev([GLib.get_user_data_dir(), 'applications', fileName]);
+            if (!Gio.File.new_for_path(desktopPath).query_exists(null)) return null;
+
+            const desktopAppInfo = GioUnix.DesktopAppInfo || Gio.DesktopAppInfo;
+            return desktopAppInfo?.new_from_filename?.(desktopPath) || null;
+        } catch (e) {
+            logError(`Failed to load desktop app info for ${appId}: ${e.message}`);
+            return null;
+        }
+    }
+
+    _createShellAppForAppInfo(appInfo) {
+        try {
+            return new Shell.App({ app_info: appInfo });
+        } catch (e) {
+            return appInfo
+                ? {
+                    appInfo,
+                    get_id: () => appInfo.get_id?.() || '',
+                    get_name: () => appInfo.get_name?.() || appInfo.get_display_name?.() || '',
+                    get_app_info: () => appInfo,
+                    activate: () => appInfo.launch([], global.create_app_launch_context?.(global.get_current_time?.() ?? 0, -1) ?? null),
+                    open_new_window: workspace => appInfo.launch([], global.create_app_launch_context?.(global.get_current_time?.() ?? 0, workspace ?? -1) ?? null)
+                }
+                : null;
+        }
+    }
+
+    _lookupAppForConfig(appSystem, appId) {
+        if (!appId) return null;
+
+        try {
+            const app = appSystem.lookup_app(appId);
+            if (app) return app;
+        } catch (e) {
+            // Fall back below for freshly-created CLI launchers.
+        }
+
+        const normalizedAppId = String(appId).toLowerCase();
+        if (!CLI_DESKTOP_PREFIXES.some(prefix => normalizedAppId.startsWith(prefix))) {
+            return null;
+        }
+
+        return this._createShellAppForAppInfo(this._loadDesktopAppInfo(appId));
+    }
+
     _isWindowMaximized(win) {
         try {
             if (typeof win.get_maximized === 'function') {
@@ -1666,7 +1825,10 @@ export default class ProfilesModule {
         const app = this._getWindowApp(win);
         let appId = app ? app.get_id() : null;
         const wmClass = win.get_wm_class() || '';
-        if (!appId && wmClass) {
+        const cliAppId = this._getCliAppIdFromWmClass(wmClass);
+        if (cliAppId) {
+            appId = cliAppId;
+        } else if (!appId && wmClass) {
             appId = wmClass.includes('.') ? wmClass + '.desktop' : wmClass.toLowerCase() + '.desktop';
         }
         const title = win.get_title() || '';
@@ -2336,7 +2498,7 @@ export default class ProfilesModule {
     }
 
     _moveWindowToWorkspace(win, workspaceIndex) {
-        if (!win || workspaceIndex === null || workspaceIndex === undefined || workspaceIndex < 0) return;
+        if (!this._windowReadyForNativeOps(win) || workspaceIndex === null || workspaceIndex === undefined || workspaceIndex < 0) return;
         if (!this._ensureWorkspaceExists(workspaceIndex)) return;
 
         const workspaceManager = global.workspace_manager;
@@ -2347,6 +2509,8 @@ export default class ProfilesModule {
             const currentWorkspace = win.get_workspace();
             const currentIndex = currentWorkspace ? (typeof currentWorkspace.index === 'function' ? currentWorkspace.index() : (typeof currentWorkspace.get_index === 'function' ? currentWorkspace.get_index() : -1)) : -1;
             if (currentIndex === workspaceIndex) return;
+
+            if (!this._windowReadyForNativeOps(win)) return;
 
             if (typeof win.change_workspace_by_index === 'function') {
                 win.change_workspace_by_index(workspaceIndex, false);
@@ -2419,7 +2583,7 @@ export default class ProfilesModule {
     }
 
     _applyPaperWMVerticalPlacement(win, config, tiling = null) {
-        if (!win || !this._hasPaperWMPlacement(config) || (config.paperwm_row ?? 0) <= 0) {
+        if (!this._windowReadyForNativeOps(win) || !this._hasPaperWMPlacement(config) || (config.paperwm_row ?? 0) <= 0) {
             return false;
         }
 
@@ -2433,7 +2597,7 @@ export default class ProfilesModule {
 
             const anchorConfig = this._findPaperWMRestoreConfig(config, (config.paperwm_row ?? 0) - 1);
             const anchorWin = anchorConfig?._matched_window || null;
-            if (!anchorWin) return false;
+            if (!this._windowReadyForNativeOps(anchorWin)) return false;
             if (anchorWin === win) return false;
 
             const targetPosition = this._getPaperWMPosition(win, tiling);
@@ -2443,6 +2607,8 @@ export default class ProfilesModule {
             }
 
             const space = anchorPosition.space;
+            if (!this._isPaperWMSpaceReadyForLayout(space)) return false;
+
             const sourceColIndex = space.indexOf(win);
             if (sourceColIndex < 0) return false;
 
@@ -2466,12 +2632,14 @@ export default class ProfilesModule {
             if (typeof space.layout === 'function') {
                 const options = { ensure: false };
                 const allocator = this._getPaperWMEqualHeightAllocator(tiling);
-                if (destColumn.length > 1) {
+                if (destColumn.length > 1 && typeof allocator === 'function') {
                     options.customAllocators = {
                         [destColIndex]: allocator
                     };
                 }
-                space.layout(true, options);
+                if (!this._safePaperWMSpaceLayout(space, options, 'PaperWM vertical placement')) {
+                    return false;
+                }
             }
 
             log(`PaperWM: Placed ${win.get_title?.() || config.title || config.app_id} below ${anchorWin.get_title?.() || anchorConfig.title || anchorConfig.app_id}`);
@@ -2641,7 +2809,7 @@ export default class ProfilesModule {
                 const windows = columns.get(col)
                     .sort((a, b) => (a.paperwm_row ?? 0) - (b.paperwm_row ?? 0))
                     .map(config => config._matched_window)
-                    .filter(win => this._isLiveNormalWindow(win));
+                    .filter(win => this._windowReadyForNativeOps(win));
 
                 return {
                     savedCol: col,
@@ -2656,6 +2824,10 @@ export default class ProfilesModule {
 
         if (this._isPaperWMGroupReconciled(space, targetColumns)) {
             return { changed: false, verified: true, columns: targetColumns.length };
+        }
+
+        if (!this._isPaperWMSpaceReadyForLayout(space)) {
+            return { changed: false, verified: false, columns: targetColumns.length };
         }
 
         const targetWindows = new Set();
@@ -2711,7 +2883,9 @@ export default class ProfilesModule {
                 }
             }
 
-            space.layout(true, options);
+            if (!this._safePaperWMSpaceLayout(space, options, 'PaperWM layout reconcile')) {
+                return { changed: false, verified: false, columns: targetColumns.length };
+            }
         }
 
         return {
@@ -2821,7 +2995,7 @@ export default class ProfilesModule {
 
     _applyTilingShellTile(win, config) {
         const tile = this._cloneTilingShellTile(config?.tilingshell_tile);
-        if (!win || !tile) return false;
+        if (!this._windowReadyForNativeOps(win) || !tile) return false;
 
         try {
             if (this._isTilingShellWindowInSavedPosition(win, config)) {
@@ -2859,7 +3033,7 @@ export default class ProfilesModule {
 
     _applyTilingAssistantPlacement(win, config) {
         const placement = this._cloneTilingAssistantPlacement(config?.tilingassistant);
-        if (!win || !placement) return false;
+        if (!this._windowReadyForNativeOps(win) || !placement) return false;
 
         try {
             if (this._isTilingAssistantWindowInSavedPosition(win, config)) {
@@ -2901,7 +3075,7 @@ export default class ProfilesModule {
 
     _applyGTilePlacement(win, config) {
         const placement = this._cloneGTilePlacement(config?.gtile);
-        if (!win || !placement) return false;
+        if (!this._windowReadyForNativeOps(win) || !placement) return false;
 
         try {
             const settings = this._getGTileSettings();
@@ -2944,9 +3118,8 @@ export default class ProfilesModule {
                 win.unmaximize();
             }
 
-            if (typeof win.move_to_monitor === 'function') {
-                win.move_to_monitor(monitorIndex);
-            }
+            this._moveWindowToMonitorIfNeeded(win, monitorIndex, 'gTile placement restore');
+            if (!this._windowReadyForNativeOps(win)) return false;
 
             const x = Math.round(projected.x + spacing);
             const y = Math.round(projected.y + spacing);
@@ -2956,6 +3129,7 @@ export default class ProfilesModule {
             if (typeof win.move_frame === 'function') {
                 win.move_frame(true, x, y);
             }
+            if (!this._windowReadyForNativeOps(win)) return false;
             win.move_resize_frame(true, x, y, width, height);
             log(`gTile: restored grid-relative geometry for ${win.get_title?.() || config.title || config.app_id}`);
             return true;
@@ -3015,7 +3189,7 @@ export default class ProfilesModule {
 
     _applyForgePlacement(win, config) {
         const forge = this._cloneForgePlacement(config?.forge);
-        if (!win || !forge) return false;
+        if (!this._windowReadyForNativeOps(win) || !forge) return false;
 
         try {
             const extWm = this._getForgeWindowManager();
@@ -3072,7 +3246,7 @@ export default class ProfilesModule {
     }
 
     _applyWindowGeometry(win, config) {
-        if (!win) return;
+        if (!this._windowReadyForNativeOps(win)) return;
 
         try {
             const rect = this._cloneRectObject(config?.rect);
@@ -3088,10 +3262,8 @@ export default class ProfilesModule {
                 targetMonitorIndex = 0;
             }
 
-            if (typeof win.get_monitor === 'function' &&
-                typeof win.move_to_monitor === 'function' &&
-                win.get_monitor() !== targetMonitorIndex) {
-                win.move_to_monitor(targetMonitorIndex);
+            if (!paperWMHandled) {
+                this._moveWindowToMonitorIfNeeded(win, targetMonitorIndex, 'profile geometry restore');
             }
 
             let x = rect ? rect.x : 0;
@@ -3135,7 +3307,10 @@ export default class ProfilesModule {
                 this._applyForgePlacement(win, config);
             const handledByTiler = paperWMHandled || tilingShellHandled || tilingAssistantHandled || gTileHandled || forgeHandled;
 
+            if (!this._windowReadyForNativeOps(win)) return;
+
             if (!handledByTiler && config.maximized && typeof win.maximize === 'function') {
+                if (!this._windowReadyForNativeOps(win)) return;
                 win.maximize(Meta.MaximizeFlags.BOTH);
             } else if (!handledByTiler && rect && typeof win.move_resize_frame === 'function') {
                 if (typeof win.unmake_fullscreen === 'function') {
@@ -3144,12 +3319,14 @@ export default class ProfilesModule {
                 if (typeof win.unmaximize === 'function') {
                     win.unmaximize();
                 }
+                if (!this._windowReadyForNativeOps(win)) return;
                 win.move_resize_frame(true, x, y, width, height);
             }
 
             if (!handledByTiler) {
                 try {
                     if (typeof win.raise === 'function') {
+                        if (!this._windowReadyForNativeOps(win)) return;
                         win.raise();
                     }
                 } catch (raiseErr) {
@@ -3162,7 +3339,7 @@ export default class ProfilesModule {
                 try {
                     GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
                         if (!this._active) return GLib.SOURCE_REMOVE;
-                        if (win && typeof win.activate === 'function') {
+                        if (this._windowReadyForNativeOps(win) && typeof win.activate === 'function') {
                             win.activate(global.get_current_time());
                         }
                         return GLib.SOURCE_REMOVE;
@@ -3185,7 +3362,7 @@ export default class ProfilesModule {
 
                     const timerId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 350, () => {
                         attempts++;
-                        if (!this._active) {
+                        if (!this._active || !this._windowReadyForNativeOps(win)) {
                             cleanupSlurpTimer();
                             return GLib.SOURCE_REMOVE;
                         }
@@ -3272,6 +3449,7 @@ export default class ProfilesModule {
             byAppId
         };
         this._contextLaunchOverrideClearId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 20000, () => {
+            this._contextLaunchOverrideClearId = 0;
             this._clearContextLaunchOverrides();
             return GLib.SOURCE_REMOVE;
         });
@@ -3512,7 +3690,7 @@ export default class ProfilesModule {
         const actors = global.get_window_actors();
         const stackMap = new Map();
         actors.forEach((a, idx) => {
-            const w = a.get_meta_window();
+            const w = this._getSafeMetaWindow(a);
             if (w) stackMap.set(w, idx);
         });
 
@@ -3637,7 +3815,15 @@ export default class ProfilesModule {
         try {
             const appSystem = Shell.AppSystem.get_default();
             const actors = global.get_window_actors();
-            const runningWindows = actors.map(a => a.get_meta_window()).filter(w => w && w.get_window_type() === Meta.WindowType.NORMAL);
+            const runningWindows = actors
+                .map(actor => {
+                    try {
+                        return this._getSafeMetaWindow(actor);
+                    } catch (e) {
+                        return null;
+                    }
+                })
+                .filter(win => this._windowReadyForNativeOps(win));
             const candidates = this._buildRunningWindowCandidates(runningWindows);
 
             // Sort profile configs in exact physical tiling order to naturally replicate the window positions
@@ -3696,7 +3882,7 @@ export default class ProfilesModule {
                     if (!optimalMatches.has(i)) {
                         const config = sortedProfile[i];
                         if (config.app_id) {
-                            const app = appSystem.lookup_app(config.app_id);
+                            const app = this._lookupAppForConfig(appSystem, config.app_id);
                             if (app) {
                                 launchConfigs.push({ config, app });
                             }
@@ -3772,7 +3958,7 @@ export default class ProfilesModule {
     }
 
     _positionWindow(win, config) {
-        if (!win) return;
+        if (!this._windowReadyForNativeOps(win)) return;
         config._matched_window = win;
         if (this._hasPaperWMPlacement(config)) {
             this._schedulePaperWMLayoutReconcile();
@@ -3780,14 +3966,14 @@ export default class ProfilesModule {
 
         // Perform geometry movements in an idle task to ensure Mutter processes layout sizes fully
         GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
-            if (!this._active) return GLib.SOURCE_REMOVE;
+            if (!this._active || !this._windowReadyForNativeOps(win)) return GLib.SOURCE_REMOVE;
 
             this._moveWindowToWorkspace(win, config.workspace);
             this._applyWindowGeometry(win, config);
 
             // Some clients reassert size after workspace moves/unmaximize. Reapply once after Mutter settles.
             GLib.timeout_add(GLib.PRIORITY_DEFAULT, 150, () => {
-                if (!this._active) return GLib.SOURCE_REMOVE;
+                if (!this._active || !this._windowReadyForNativeOps(win)) return GLib.SOURCE_REMOVE;
 
                 this._moveWindowToWorkspace(win, config.workspace);
                 this._applyWindowGeometry(win, config);
@@ -3797,7 +3983,7 @@ export default class ProfilesModule {
             if (config._context_launch_attachment) {
                 for (const delay of [900, 2200, 4200]) {
                     GLib.timeout_add(GLib.PRIORITY_DEFAULT, delay, () => {
-                        if (!this._active) return GLib.SOURCE_REMOVE;
+                        if (!this._active || !this._windowReadyForNativeOps(win)) return GLib.SOURCE_REMOVE;
 
                         this._moveWindowToWorkspace(win, config.workspace);
                         this._applyWindowGeometry(win, config);
@@ -3815,7 +4001,7 @@ export default class ProfilesModule {
         
         try {
             // Guard against finalized or quickly closed windows
-            if (!win || win.get_window_type() !== Meta.WindowType.NORMAL) return;
+            if (!this._windowReadyForNativeOps(win)) return;
 
             const wmClass = win.get_wm_class();
             const app = this._getWindowApp(win);
@@ -3876,7 +4062,7 @@ export default class ProfilesModule {
             // First filter out any windows that might have been destroyed/closed
             const activeWindows = this._recentlyMappedWindows.filter(win => {
                 try {
-                    return win && win.get_window_type() === Meta.WindowType.NORMAL;
+                    return this._windowReadyForNativeOps(win);
                 } catch (e) {
                     return false;
                 }
@@ -3955,8 +4141,14 @@ export default class ProfilesModule {
 
         try {
             const windows = global.get_window_actors()
-                .map(actor => actor.get_meta_window())
-                .filter(win => win && win.get_window_type() === Meta.WindowType.NORMAL);
+                .map(actor => {
+                    try {
+                        return this._getSafeMetaWindow(actor);
+                    } catch (e) {
+                        return null;
+                    }
+                })
+                .filter(win => this._windowReadyForNativeOps(win));
             if (windows.length === 0) return;
 
             const candidates = this._buildRunningWindowCandidates(windows);

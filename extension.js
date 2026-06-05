@@ -8,7 +8,7 @@ import GLib from 'gi://GLib';
 import Gio from 'gi://Gio';
 import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 
-const DEBUG = true;
+const DEBUG = false;
 
 /**
  * Log a message to the console with the GnomeEssentials prefix if DEBUG is enabled.

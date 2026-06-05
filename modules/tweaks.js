@@ -1,9 +1,9 @@
 // GNOME Essentials: Essential Tweaks Module
 
-import BatteryHealthSound from './tweaks/batteryHealthSound.js?v=20260529';
-import EssentialMenu from './tweaks/essentialMenu.js?v=20260531-3d-tactile-depth';
-import AppUninstallUtility from './tweaks/appUninstallUtility.js?v=20260603-install-source';
-import EssentialShelf from './tweaks/essentialShelf.js?v=20260602-shelf-mvp';
+import BatteryHealthSound from './tweaks/batteryHealthSound.js?v=20260605-lifecycle';
+import EssentialMenu from './tweaks/essentialMenu.js?v=20260605-menu-profile-cli';
+import AppUninstallUtility from './tweaks/appUninstallUtility.js?v=20260605-install-source-safety';
+import EssentialShelf from './tweaks/essentialShelf.js?v=20260605-shelf-lifecycle';
 
 const DEBUG = false;
 

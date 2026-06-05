@@ -62,11 +62,11 @@ export default class EssentialShelf {
     }
 
     disable() {
+        this._enabled = false;
         this._stopInboxMonitor();
         this._cancelInboxProcess();
         this._disconnectSettings();
         this._changedHandlers.clear();
-        this._enabled = false;
         this._settings = null;
     }
 
@@ -614,6 +614,7 @@ export default class EssentialShelf {
 
     _startInboxMonitor() {
         this._stopInboxMonitor();
+        if (!this._enabled) return;
 
         try {
             const dir = Gio.File.new_for_path(this._getStorageDirPath());
@@ -623,6 +624,7 @@ export default class EssentialShelf {
 
             this._inboxMonitor = dir.monitor_directory(Gio.FileMonitorFlags.NONE, null);
             this._inboxMonitor.connect('changed', (_monitor, file) => {
+                if (!this._enabled) return;
                 if (file?.get_basename?.() === SHELF_INBOX_FILE_NAME) {
                     this._queueProcessInbox();
                 }
@@ -645,10 +647,12 @@ export default class EssentialShelf {
     }
 
     _queueProcessInbox() {
+        if (!this._enabled) return;
         this._cancelInboxProcess();
 
         this._inboxProcessTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, INBOX_PROCESS_DELAY_MS, () => {
             this._inboxProcessTimeoutId = 0;
+            if (!this._enabled) return GLib.SOURCE_REMOVE;
             this._processInbox();
             return GLib.SOURCE_REMOVE;
         });
@@ -662,6 +666,7 @@ export default class EssentialShelf {
     }
 
     async _processInbox() {
+        if (!this._enabled) return;
         if (this._processingInbox) return;
 
         this._processingInbox = true;
@@ -669,6 +674,7 @@ export default class EssentialShelf {
 
         try {
             claimedFile = await this._claimInboxFileAsync();
+            if (!this._enabled) return;
             if (!claimedFile) {
                 this._processingInbox = false;
                 return;
@@ -684,6 +690,7 @@ export default class EssentialShelf {
                     }
                 });
             });
+            if (!this._enabled) return;
 
             let text;
             if (typeof TextDecoder !== 'undefined') {
@@ -696,6 +703,7 @@ export default class EssentialShelf {
             let added = 0;
 
             for (const value of values) {
+                if (!this._enabled) return;
                 const item = this._itemFromUriValue(value);
                 if (this._addNormalizedItem(item, { save: false, emit: false })) {
                     added += 1;
@@ -703,6 +711,7 @@ export default class EssentialShelf {
             }
 
             if (added > 0) {
+                if (!this._enabled) return;
                 this._save();
                 this._emitChanged();
                 log(`Imported ${added} item${added === 1 ? '' : 's'} from shelf inbox`);
@@ -1218,7 +1227,10 @@ export default class EssentialShelf {
         try {
             const data = JSON.parse(this._settings?.get_string('profiles-saved-data') || '{}');
             const profiles = data?.version === 2 && data.profiles ? data.profiles : data;
-            const entry = profiles?.[profileName];
+            const resolvedProfileName = profiles?.[profileName]
+                ? profileName
+                : Object.keys(profiles || {}).find(name => name.toLowerCase() === profileName.toLowerCase());
+            const entry = resolvedProfileName ? profiles?.[resolvedProfileName] : null;
             const windows = Array.isArray(entry)
                 ? entry
                 : Array.isArray(entry?.windows)

@@ -54,14 +54,29 @@
 
     <key name="deepwork-ambient-dim-opacity" type="d">
       <default>0.5</default>
+      <range min="0.0" max="1.0"/>
       <summary>Ambient Dimming Opacity</summary>
       <description>Opacity level of the dimming overlay (0.0 to 1.0).</description>
+    </key>
+
+    <key name="deepwork-ambient-dim-darkening-intensity" type="d">
+      <default>8.0</default>
+      <range min="0.0" max="10.0"/>
+      <summary>Ambient Dim Darkening Intensity</summary>
+      <description>Absolute darkening strength for opacity dimming and the soft ambient overlay (0.0 is none, 10.0 is fully dark).</description>
     </key>
 
     <key name="deepwork-ambient-blur-intensity" type="d">
       <default>0.5</default>
       <summary>Ambient Background Blur Intensity</summary>
       <description>Applies dynamic blur filter to background windows (0.0 to 1.0).</description>
+    </key>
+
+    <key name="deepwork-ambient-blur-darkening-intensity" type="d">
+      <default>1.5</default>
+      <range min="0.0" max="10.0"/>
+      <summary>Ambient Blur Darkening Intensity</summary>
+      <description>Absolute brightness darkening applied by blur (0.0 is none, 10.0 is fully dark; 1.5 keeps the previous 15% darkening).</description>
     </key>
 
     <key name="deepwork-true-ambient-opacity" type="d">

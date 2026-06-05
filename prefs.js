@@ -385,7 +385,7 @@ export default class GnomeEssentialsPreferences extends ExtensionPreferences {
         // Opacity Scale Slider
         const opacityAdjustment = new Gtk.Adjustment({
             value: settings.get_double('deepwork-ambient-dim-opacity'),
-            lower: 0.1,
+            lower: 0.0,
             upper: 1.0,
             step_increment: 0.05,
             page_increment: 0.1
@@ -402,10 +402,35 @@ export default class GnomeEssentialsPreferences extends ExtensionPreferences {
 
         const opacityActionRow = new Adw.ActionRow({
             title: 'Ambient Dimming Opacity',
-            subtitle: 'Adjust transparency level of non-focused desktop windows (0.1 = extremely dark, 0.9 = light).'
+            subtitle: 'Adjust transparency level of non-focused desktop windows (0.0 = hidden, 1.0 = fully visible).'
         });
         opacityActionRow.add_suffix(opacityScale);
         dimmingGroup.add(opacityActionRow);
+
+        const dimDarkeningAdjustment = new Gtk.Adjustment({
+            value: settings.get_double('deepwork-ambient-dim-darkening-intensity'),
+            lower: 0.0,
+            upper: 10.0,
+            step_increment: 1.0,
+            page_increment: 1.0
+        });
+        settings.bind('deepwork-ambient-dim-darkening-intensity', dimDarkeningAdjustment, 'value', Gio.SettingsBindFlags.DEFAULT);
+
+        const dimDarkeningScale = new Gtk.Scale({
+            adjustment: dimDarkeningAdjustment,
+            draw_value: true,
+            digits: 1,
+            hexpand: true,
+            valign: Gtk.Align.CENTER,
+            width_request: 200
+        });
+
+        const dimDarkeningActionRow = new Adw.ActionRow({
+            title: 'Dim Darkening Intensity',
+            subtitle: 'Absolute dim darkening strength (0.0 = none, 10.0 = fully dark).'
+        });
+        dimDarkeningActionRow.add_suffix(dimDarkeningScale);
+        dimmingGroup.add(dimDarkeningActionRow);
 
         const dimLevel3Row = new Adw.SwitchRow({
             title: 'Keep Background Window Dim Active on Level 3',
@@ -438,6 +463,31 @@ export default class GnomeEssentialsPreferences extends ExtensionPreferences {
         });
         blurActionRow.add_suffix(blurScale);
         dimmingGroup.add(blurActionRow);
+
+        const blurDarkeningAdjustment = new Gtk.Adjustment({
+            value: settings.get_double('deepwork-ambient-blur-darkening-intensity'),
+            lower: 0.0,
+            upper: 10.0,
+            step_increment: 1.0,
+            page_increment: 1.0
+        });
+        settings.bind('deepwork-ambient-blur-darkening-intensity', blurDarkeningAdjustment, 'value', Gio.SettingsBindFlags.DEFAULT);
+
+        const blurDarkeningScale = new Gtk.Scale({
+            adjustment: blurDarkeningAdjustment,
+            draw_value: true,
+            digits: 1,
+            hexpand: true,
+            valign: Gtk.Align.CENTER,
+            width_request: 200
+        });
+
+        const blurDarkeningActionRow = new Adw.ActionRow({
+            title: 'Blur Darkening Intensity',
+            subtitle: 'Absolute blur brightness darkening (0.0 = none, 10.0 = fully dark).',
+        });
+        blurDarkeningActionRow.add_suffix(blurDarkeningScale);
+        dimmingGroup.add(blurDarkeningActionRow);
 
         const blurLevel3Row = new Adw.SwitchRow({
             title: 'Keep Background Window Blur Active on Level 3',
@@ -1046,6 +1096,25 @@ set -eu
 
 DATA_DIR="\${XDG_DATA_HOME:-$HOME/.local/share}/gnome-essentials"
 INBOX="$DATA_DIR/shelf-inbox.jsonl"
+SCHEMA_DIR="\${XDG_DATA_HOME:-$HOME/.local/share}/gnome-shell/extensions/gnome-essentials@ritesh/schemas"
+
+notifications_enabled=true
+if command -v gsettings >/dev/null 2>&1; then
+    if [ -d "$SCHEMA_DIR" ]; then
+        notification_setting=$(gsettings --schemadir "$SCHEMA_DIR" get org.gnome.shell.extensions.gnome-essentials tweaks-essential-shelf-show-notifications 2>/dev/null || printf 'true')
+    else
+        notification_setting=$(gsettings get org.gnome.shell.extensions.gnome-essentials tweaks-essential-shelf-show-notifications 2>/dev/null || printf 'true')
+    fi
+    if [ "$notification_setting" = "false" ]; then
+        notifications_enabled=false
+    fi
+fi
+
+notify_shelf() {
+    if [ "$notifications_enabled" = "true" ] && command -v notify-send >/dev/null 2>&1; then
+        notify-send "GNOME Essentials" "$1"
+    fi
+}
 
 mkdir -p "$DATA_DIR"
 
@@ -1055,9 +1124,7 @@ if [ -z "$selection" ]; then
 fi
 
 if [ -z "$selection" ]; then
-    if command -v notify-send >/dev/null 2>&1; then
-        notify-send "GNOME Essentials" "No selected files to send to Shelf."
-    fi
+    notify_shelf "No selected files to send to Shelf."
     exit 0
 fi
 
@@ -1067,12 +1134,35 @@ printf '%s\\n' "$selection" | while IFS= read -r item; do
 done
 
 count=$(printf '%s\\n' "$selection" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')
-if command -v notify-send >/dev/null 2>&1; then
-    notify-send "GNOME Essentials" "Sent $count item(s) to Essential Shelf."
-fi
+notify_shelf "Sent $count item(s) to Essential Shelf."
 `;
 
-        const isShelfNautilusScriptInstalled = () => Gio.File.new_for_path(shelfNautilusScriptPath).query_exists(null);
+        const decodeTextContents = (contents) => {
+            if (typeof TextDecoder !== 'undefined') {
+                return new TextDecoder('utf-8').decode(contents);
+            }
+            return imports.byteArray.toString(contents);
+        };
+
+        const getShelfNautilusScriptStatus = () => {
+            const file = Gio.File.new_for_path(shelfNautilusScriptPath);
+            if (!file.query_exists(null)) {
+                return { installed: false, current: false, readable: true };
+            }
+
+            try {
+                const [, contents] = file.load_contents(null);
+                return {
+                    installed: true,
+                    current: decodeTextContents(contents) === shelfNautilusScript,
+                    readable: true
+                };
+            } catch (e) {
+                return { installed: true, current: false, readable: false };
+            }
+        };
+
+        const isShelfNautilusScriptInstalled = () => getShelfNautilusScriptStatus().installed;
 
         const installShelfNautilusScript = () => {
             const dir = Gio.File.new_for_path(shelfNautilusScriptsDir);
@@ -1184,12 +1274,20 @@ fi
         essentialShelfGroup.add(shelfNautilusScriptRow);
 
         const updateShelfNautilusScriptRow = () => {
-            const installed = isShelfNautilusScriptInstalled();
+            const status = getShelfNautilusScriptStatus();
+            const installed = status.installed;
             shelfNautilusScriptRow.set_subtitle(shelfNautilusScriptError ||
-                (installed
-                    ? `Installed in Files scripts as "${shelfNautilusScriptName}".`
-                    : 'Install a Nautilus script for right-clicking selected files and sending them to Essential Shelf.'));
-            installShelfScriptButton.set_sensitive(!installed);
+                (!installed
+                    ? 'Install a Nautilus script for right-clicking selected files and sending them to Essential Shelf.'
+                    : status.current
+                        ? `Installed in Files scripts as "${shelfNautilusScriptName}".`
+                        : status.readable
+                            ? 'Installed Files script is outdated. Update it to apply the current Shelf behavior.'
+                            : 'Installed Files script could not be checked. Update it to repair the script.'));
+            installShelfScriptButton.set_sensitive(!installed || !status.current);
+            installShelfScriptButton.set_tooltip_text(installed && !status.current
+                ? 'Update Files script'
+                : 'Install Files script');
             removeShelfScriptButton.set_sensitive(installed);
         };
 
@@ -1729,7 +1827,7 @@ fi
                                     }
                                     
                                     let command = exec;
-                                    const shellMatch = exec.match(/^[^\s]+\s+-c\s+['"]([^'"]+)['"]/);
+                                    const shellMatch = exec.match(/\s+-c\s+['"]([^'"]+)['"]/);
                                     if (shellMatch) {
                                         let inner = shellMatch[1].trim();
                                         inner = inner.replace(/;\s*exec\s+[^\s]+$/, '');
@@ -1739,19 +1837,20 @@ fi
                                             cmdPart = cmdPart.replace(/\s+\$\$?args$/, '');
                                             command = cmdPart;
                                         } else {
-                                            inner = inner.replace(/\s+"?\$\$?@"?$/, '');
+                                            inner = inner.replace(/\s+"?\(?\(?\$\$?@"?\)?\)?$/, '');
                                             command = inner;
                                         }
+                                        command = command.replace(/\\"/g, '"').replace(/\\\\/g, '\\');
                                     }
                                     
                                     const parsedActions = [];
                                     for (const act of actionsList) {
                                         let actCmd = act.exec;
-                                        const actShellMatch = act.exec.match(/^[^\s]+\s+-c\s+['"]([^'"]+)['"]/);
+                                        const actShellMatch = act.exec.match(/\s+-c\s+['"]([^'"]+)['"]/);
                                         if (actShellMatch) {
                                             let actInner = actShellMatch[1].trim();
                                             actInner = actInner.replace(/;\s*exec\s+[^\s]+$/, '');
-                                            actCmd = actInner;
+                                            actCmd = actInner.replace(/\\"/g, '"').replace(/\\\\/g, '\\');
                                         }
                                         parsedActions.push(`${act.name}: ${actCmd}`);
                                     }
@@ -1790,7 +1889,7 @@ fi
             if (cmd.length === 0 || name.length === 0) {
                 throw new Error('Command and name cannot be empty.');
             }
-            
+
             // Resolve the executable token, skipping any environment variables
             const parts = cmd.split(/\s+/);
             let exeToken = '';
@@ -1854,26 +1953,30 @@ fi
             }
 
             const userShell = GLib.getenv('SHELL') || 'bash';
-            
+
             const savedTerm = settings.get_string('tweaks-cli-creator-terminal');
             const acceptFiles = dragDropInput || (mimeTypesInput && mimeTypesInput.length > 0);
 
             // Build the main Exec command
             let finalExec = '';
             let commandToRun = cmd;
-            
+
             if (argPromptInput) {
                 commandToRun = `args=$$(zenity --entry --title="${name}" --text="Enter arguments for ${name}:") && ${cmd} $$args`;
             }
-            
+
+            const escapedCommandToRun = commandToRun
+                .replace(/\\/g, '\\\\')
+                .replace(/"/g, '\\\\"');
+
             if (backgroundInput) {
-                finalExec = `${userShell} -c "${commandToRun}"`;
+                finalExec = `${userShell} -c "${escapedCommandToRun}"`;
             } else {
                 let innerCmd = '';
                 if (acceptFiles) {
-                    innerCmd = `${userShell} -c '${commandToRun} "$$@"; exec ${userShell}' -- %F`;
+                    innerCmd = `${userShell} -c "${escapedCommandToRun} \\\\"$@\\\\"; exec ${userShell}" -- %F`;
                 } else {
-                    innerCmd = `${userShell} -c "${commandToRun}; exec ${userShell}"`;
+                    innerCmd = `${userShell} -c "${escapedCommandToRun}; exec ${userShell}"`;
                 }
 
                 if (savedTerm) {
@@ -1902,10 +2005,9 @@ fi
                 }
             }
 
-            // Build Right-Click Actions sections
             let actionsSection = '';
             let actionsListString = '';
-            
+
             if (actionsText.length > 0) {
                 const actionParts = actionsText.split(';').map(s => s.trim()).filter(s => s.includes(':'));
                 const keys = [];
@@ -1914,16 +2016,20 @@ fi
                     const actionName = actionParts[i].substring(0, idx).trim();
                     const actionCmd = actionParts[i].substring(idx + 1).trim();
                     if (!actionName || !actionCmd) continue;
-                    
+
                     const actionKey = `action${i}`;
                     keys.push(actionKey);
-                    
+
                     let actionExec = '';
+                    const escapedActionCmd = actionCmd
+                        .replace(/\\/g, '\\\\')
+                        .replace(/"/g, '\\\\"');
+
                     if (backgroundInput) {
-                        actionExec = `${userShell} -c "${actionCmd}"`;
+                        actionExec = `${userShell} -c "${escapedActionCmd}"`;
                     } else {
                         // Use terminal prefix if custom terminal is set
-                        let actionInnerCmd = `${userShell} -c "${actionCmd}; exec ${userShell}"`;
+                        let actionInnerCmd = `${userShell} -c "${escapedActionCmd}; exec ${userShell}"`;
                         if (!backgroundInput && savedTerm) {
                             // Apply the same custom class to right-click desktop actions so they map to the same window identity.
                             if (savedTerm === 'gnome-terminal') {
@@ -1947,7 +2053,7 @@ fi
                             actionExec = actionInnerCmd;
                         }
                     }
-                    
+
                     actionsSection += `
 [Desktop Action ${actionKey}]
 Name=${actionName}

@@ -11,6 +11,17 @@ GNOME already has a beautiful foundation. GNOME Essentials does not try to repla
 
 Some of these problems can be solved with separate extensions. GNOME Essentials exists because the day-to-day experience is different when the pieces are built to work together.
 
+## Quick Links
+
+- [Requirements and Optional Tools](#requirements-and-optional-tools)
+- [Installation](#installation)
+- [Uninstalling](#uninstalling)
+- [Feature Tour](#feature-tour)
+- [Settings Window](#settings-window)
+- [Practical Limitations](#practical-limitations)
+- [Troubleshooting](#troubleshooting)
+- [Development Notes](#development-notes)
+
 ## Why This Extension Exists
 
 Most desktop utilities solve one tiny problem in isolation. One extension hides the panel. Another manages windows. Another adds a launcher. Another handles focus timers. Over time the desktop becomes a pile of separate tools that do not understand each other.
@@ -136,6 +147,26 @@ The extension is written for GNOME Shell and uses GJS, Libadwaita preferences, G
 
 That is normal for ambitious GNOME Shell extensions, but it means new GNOME Shell releases should be tested carefully.
 
+## Requirements and Optional Tools
+
+Core requirements:
+
+- GNOME Shell 47, 48, 49, 50, or 51
+- GNOME's normal GJS, GLib/Gio, GTK, Libadwaita, and GSettings stack
+- `git` for the one-line installer and update flow
+- `glib-compile-schemas` for compiling the extension's settings schema
+- `gnome-extensions`, Extensions Manager, or GNOME Extensions to enable and disable the extension
+
+Optional helpers enable specific features:
+
+- GNOME LocalSearch through `localsearch`, `tracker3`, or `tracker` for Essential Menu file search.
+- UPower and desktop sound theme files for Battery Health Sound.
+- `pkexec` and supported package managers such as Flatpak, Snap, APT, DNF, Pacman, Zypper, or Emerge for App Uninstallation Utility actions.
+- `zenity` for CLI Application Creator launchers that prompt for arguments.
+- Nautilus / GNOME Files for the optional "Send to Essential Shelf" script integration.
+
+If an optional helper is missing, the related feature either falls back where possible or reports that the feature is unavailable.
+
 ## Installation
 
 ### One-Line Install
@@ -222,6 +253,30 @@ git pull
 
 Then restart GNOME Shell again. Recompiling schemas is important whenever settings are added or changed, and the installer already does that for you.
 
+## Uninstalling
+
+Disable the extension first:
+
+```bash
+gnome-extensions disable gnome-essentials@ritesh
+```
+
+Then remove the installed extension directory or development symlink:
+
+```bash
+rm -rf ~/.local/share/gnome-shell/extensions/gnome-essentials@ritesh
+```
+
+Restart GNOME Shell after removing it.
+
+If you also want to remove saved preferences, profiles, and shelf data, reset the GSettings schema:
+
+```bash
+gsettings reset-recursively org.gnome.shell.extensions.gnome-essentials
+```
+
+Use the reset command with care. It clears the extension's stored settings, including saved Workspace Profiles and Essential Shelf state.
+
 ## Feature Tour
 
 ### Deep Work Focus
@@ -246,9 +301,9 @@ The important part is that Deep Work is reversible. It captures the original she
 
 Deep Work has three visual suppression levels:
 
-- Level 0: notification and dock suppression.
-- Level 1: panel hiding plus ambient effects.
-- Level 2: True Ambient Dimming for the strongest visual focus.
+- Level 1: notification and dock suppression.
+- Level 2: panel hiding plus ambient effects.
+- Level 3: True Ambient Dimming for the strongest visual focus.
 
 The level defines the overall intensity. Individual toggles let you decide exactly what should happen inside that level.
 
@@ -544,7 +599,7 @@ This feature should be used with care. It is a convenience layer over real unins
 
 ### CLI Application Creator
 
-Many power users and developers rely on terminal-based tools (like `lazygit`, `htop`, `btop`, or `agy`) for their daily work. However, launching them usually requires opening a terminal window, remembering the command, and typing it manually.
+Many power users and developers rely on terminal-based tools (like `lazygit`, `htop`, `btop`, `fzf`, or `lazydocker`) for their daily work. However, launching them usually requires opening a terminal window, remembering the command, and typing it manually.
 
 The CLI Application Creator turns any terminal command or script into a **first-class native desktop application launcher** directly from your settings panel.
 
@@ -583,6 +638,7 @@ modules/
   profiles.js
   tweaks.js
   tweaks/
+    appInstallSource.js
     batteryHealthSound.js
     essentialMenu.js
     essentialShelf.js
@@ -598,6 +654,8 @@ modules/
 `modules/profiles.js` contains Workspace Profiles, window matching, app launching, tiling metadata capture, and restore logic.
 
 `modules/tweaks.js` manages the Essential Tweaks submodules.
+
+`modules/tweaks/appInstallSource.js` contains shared install-source classification helpers for the menu and uninstaller.
 
 `modules/tweaks/essentialMenu.js` contains the centered launcher.
 

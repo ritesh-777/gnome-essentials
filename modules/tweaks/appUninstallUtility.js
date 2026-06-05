@@ -12,12 +12,11 @@ import St from 'gi://St';
 import Pango from 'gi://Pango';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
-import * as AppDisplay from 'resource:///org/gnome/shell/ui/appDisplay.js';
 import * as ModalDialog from 'resource:///org/gnome/shell/ui/modalDialog.js';
 import * as CheckBox from 'resource:///org/gnome/shell/ui/checkBox.js';
-import { classifyAppInstallSource, installSourceIconName } from './appInstallSource.js';
+import { classifyAppInstallSource, installSourceIconName } from './appInstallSource.js?v=20260605-source-path';
 
-const DEBUG = true;
+const DEBUG = false;
 
 /**
  * Log a message to the console with the uninstaller prefix if DEBUG is enabled.
@@ -130,7 +129,7 @@ function createConfirmUninstallDialog(appName, classification, app, onConfirm) {
 
     // Native Checkbox for hidden files cleanup
     const deleteDataBox = new CheckBox.CheckBox('Delete configuration and cache files');
-    deleteDataBox.checked = true;
+    deleteDataBox.checked = false;
     dialog.contentLayout.add_child(deleteDataBox);
 
     // Conditional Native Checkbox for unused dependencies (orphans)
@@ -186,6 +185,8 @@ export default class AppUninstallUtility {
         log('Enabling App Uninstallation Utility...');
 
         import('resource:///org/gnome/shell/ui/appMenu.js').then(AppMenuModule => {
+            if (!this._active) return;
+
             if (AppMenuModule.AppMenu) {
                 this._AppMenuClass = AppMenuModule.AppMenu;
 
@@ -302,31 +303,32 @@ export default class AppUninstallUtility {
      * @returns {void}
      */
     _clearAllCachedMenus() {
-        const findAllAppIcons = (parent) => {
-            let results = [];
-            if (!parent) return results;
-
-            let children = typeof parent.get_children === 'function' ? parent.get_children() : [];
-            for (let child of children) {
-                if (child && child.constructor && child.constructor.name === 'AppIcon') {
-                    results.push(child);
-                }
-                results = results.concat(findAllAppIcons(child));
-            }
-            return results;
-        };
-
         try {
-            const icons = findAllAppIcons(global.stage);
-            log(`Clearing cached menus on ${icons.length} AppIcon instances`);
-            for (const icon of icons) {
-                if (icon && icon._menu) {
-                    try {
-                        icon._menu.destroy();
-                    } catch (e) {}
-                    icon._menu = null;
+            let count = 0;
+            const stack = global.stage ? [global.stage] : [];
+
+            while (stack.length > 0) {
+                const actor = stack.pop();
+                const children = typeof actor?.get_children === 'function' ? actor.get_children() : [];
+
+                for (const child of children) {
+                    if (!child) continue;
+
+                    if (child.constructor?.name === 'AppIcon') {
+                        count++;
+                        if (child._menu) {
+                            try {
+                                child._menu.destroy();
+                            } catch (e) {}
+                            child._menu = null;
+                        }
+                    }
+
+                    stack.push(child);
                 }
             }
+
+            log(`Cleared cached menus on ${count} AppIcon instances`);
         } catch (e) {
             logError(`Failed to clear cached menus: ${e.message}`);
         }
@@ -528,7 +530,7 @@ elif command -v rpm >/dev/null; then
                 fi
             else
                 if [ "$DELETE_DEPS" = "true" ]; then
-                    pkexec sh -c "dnf remove -y '$PKG' && dnf autoremove -y"
+                    pkexec sh -c 'dnf remove -y "$1" && dnf autoremove -y' sh "$PKG"
                 else
                     pkexec dnf remove -y "$PKG"
                 fi
@@ -600,45 +602,74 @@ fi
             const home = GLib.get_home_dir();
             const configBase = GLib.get_user_config_dir();
             const cacheBase = GLib.get_user_cache_dir();
+            const canonicalHome = GLib.canonicalize_filename(home, null);
+            const canonicalConfigBase = GLib.canonicalize_filename(configBase, null);
+            const canonicalCacheBase = GLib.canonicalize_filename(cacheBase, null);
+            const sanitizeCleanupToken = value => {
+                const raw = String(value ?? '')
+                    .toLowerCase()
+                    .trim()
+                    .replace(/\.desktop$/, '')
+                    .replace(/\s+/g, '');
+                if (!raw || raw.includes('/') || raw.includes('\\') || raw.includes('..')) return '';
+
+                const token = raw.replace(/[^a-z0-9._-]/g, '');
+                return token.length >= 3 && token !== '.' && token !== '..' ? token : '';
+            };
             
-            const cleanId = appId.replace(/\.desktop$/, '').toLowerCase();
-            const cleanName = appName.toLowerCase().replace(/\s+/g, '');
+            const cleanId = sanitizeCleanupToken(appId);
+            const cleanName = sanitizeCleanupToken(appName);
             
             const probableDirs = new Set([
                 cleanId,
                 cleanName,
                 cleanId.split('.').pop()
-            ]);
+            ].filter(Boolean));
 
             // Add standard configuration structures
-            if (cleanId.includes('firefox')) {
+            const isWebAppLauncher = classification?.sourceType === 'webapp' || classification?.isPWA;
+            if (!isWebAppLauncher && cleanId.includes('firefox')) {
                 probableDirs.add('.mozilla');
             }
-            if (cleanId.includes('chrome') || cleanId.includes('chromium')) {
+            if (!isWebAppLauncher && (cleanId.includes('chrome') || cleanId.includes('chromium'))) {
                 probableDirs.add('.config/google-chrome');
                 probableDirs.add('.config/chromium');
             }
 
             // Clean up AUR helper build caches (yay, paru) for Arch Linux packages
-            probableDirs.add(`yay/${cleanId}`);
-            probableDirs.add(`yay/${cleanName}`);
-            probableDirs.add(`paru/clone/${cleanId}`);
-            probableDirs.add(`paru/clone/${cleanName}`);
+            if (cleanId) {
+                probableDirs.add(`yay/${cleanId}`);
+                probableDirs.add(`paru/clone/${cleanId}`);
+            }
+            if (cleanName) {
+                probableDirs.add(`yay/${cleanName}`);
+                probableDirs.add(`paru/clone/${cleanName}`);
+            }
 
             const trashDir = (base, folderName) => {
                 const dirPath = folderName.startsWith('.') 
                     ? GLib.build_filenamev([home, folderName])
                     : GLib.build_filenamev([base, folderName]);
+                const canonicalDir = GLib.canonicalize_filename(dirPath, null);
+                const canonicalRoot = folderName.startsWith('.')
+                    ? canonicalHome
+                    : base === configBase
+                        ? canonicalConfigBase
+                        : canonicalCacheBase;
                     
                 const file = Gio.File.new_for_path(dirPath);
                 if (file.query_exists(null)) {
                     // Critical safety checks: Never recursively delete base system user directories
-                    if (dirPath === home || dirPath === configBase || dirPath === cacheBase || folderName.length < 3) {
+                    if (canonicalDir === canonicalRoot ||
+                        canonicalDir === canonicalConfigBase ||
+                        canonicalDir === canonicalCacheBase ||
+                        !canonicalDir.startsWith(`${canonicalRoot}/`) ||
+                        folderName.length < 3) {
                         logError(`Refusing to delete critical directory path: ${dirPath}`);
                         return;
                     }
-                    log(`Cleaning up leftover configuration folder asynchronously: ${dirPath}`);
-                    this._runCommandAsync(['rm', '-rf', dirPath]);
+                    log(`Cleaning up leftover configuration folder asynchronously: ${canonicalDir}`);
+                    this._runCommandAsync(['rm', '-rf', canonicalDir]);
                 }
             };
 

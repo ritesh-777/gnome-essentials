@@ -75,6 +75,7 @@ export default class BatteryHealthSound {
      */
     constructor(settings) {
         this._settings = settings;
+        this._active = false;
         this._displayDeviceProxy = null;
         this._notificationSettings = null;
         this._batteryPropertiesChangedId = 0;
@@ -96,6 +97,7 @@ export default class BatteryHealthSound {
      * @returns {void}
      */
     enable() {
+        this._active = true;
         this._connectSettings();
         this._connectNotificationSettings();
         this._connectUPower();
@@ -108,6 +110,7 @@ export default class BatteryHealthSound {
      * @returns {void}
      */
     disable() {
+        this._active = false;
         this._stopCriticalRepeatAlert();
         this._stopSoundPatternTimers();
         this._stopPolling();
@@ -264,6 +267,10 @@ export default class BatteryHealthSound {
             GLib.PRIORITY_DEFAULT,
             POLL_INTERVAL_SECONDS,
             () => {
+                if (!this._active) {
+                    this._pollTimerId = 0;
+                    return GLib.SOURCE_REMOVE;
+                }
                 this._refreshBatteryState(false);
                 return GLib.SOURCE_CONTINUE;
             }
@@ -729,6 +736,9 @@ export default class BatteryHealthSound {
             delayMs,
             () => {
                 this._soundPatternTimerIds.delete(timerId);
+                if (!this._active || !this._isEnabled()) {
+                    return GLib.SOURCE_REMOVE;
+                }
                 callback();
                 return GLib.SOURCE_REMOVE;
             }
@@ -788,6 +798,10 @@ export default class BatteryHealthSound {
             intervalMs,
             () => {
                 this._criticalRepeatTimerId = 0;
+                if (!this._active) {
+                    this._criticalRepeatIntervalMs = 0;
+                    return GLib.SOURCE_REMOVE;
+                }
 
                 const snapshot = this._readBatterySnapshot();
                 if (!this._shouldContinueCriticalRepeat(snapshot)) {

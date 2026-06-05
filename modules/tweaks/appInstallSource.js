@@ -20,6 +20,17 @@ function desktopIdWithoutSuffix(appId) {
     return normalizeText(appId).replace(/\.desktop$/i, '');
 }
 
+function pathIsInsideDirectory(filePath, directoryPath) {
+    const path = normalizeText(filePath);
+    const directory = normalizeText(directoryPath);
+    if (!path || !directory) return false;
+
+    const canonicalPath = GLib.canonicalize_filename(path, null);
+    const canonicalDirectory = GLib.canonicalize_filename(directory, null);
+    return canonicalPath === canonicalDirectory ||
+        canonicalPath.startsWith(`${canonicalDirectory}/`);
+}
+
 /**
  * Extracts the snap identifier token occurring after a "snap run" command invocation.
  * @param {string} execLine - The desktop launcher execute command line.
@@ -170,7 +181,7 @@ export function classifyAppInstallSource(appId, desktopPath = '', appInfo = null
 
     // Heuristics for local user shortcuts and Progressive Web Apps (PWAs)
     const userAppsDir = GLib.build_filenamev([GLib.get_user_data_dir(), 'applications']);
-    if (path && path.startsWith(userAppsDir)) {
+    if (pathIsInsideDirectory(path, userAppsDir)) {
         const isWebApp = isWebAppLauncher(id, path, execLine);
         return {
             type: 'local',
@@ -195,4 +206,3 @@ export function classifyAppInstallSource(appId, desktopPath = '', appInfo = null
         details: 'Native system package'
     };
 }
-

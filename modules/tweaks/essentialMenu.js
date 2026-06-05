@@ -2,6 +2,7 @@
 
 import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';
+import GioUnix from 'gi://GioUnix';
 import GLib from 'gi://GLib';
 import Meta from 'gi://Meta';
 import Pango from 'gi://Pango';
@@ -11,9 +12,9 @@ import * as DND from 'resource:///org/gnome/shell/ui/dnd.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as ModalDialog from 'resource:///org/gnome/shell/ui/modalDialog.js';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
-import { classifyAppInstallSource } from './appInstallSource.js';
+import { classifyAppInstallSource } from './appInstallSource.js?v=20260605-source-path';
 
-const DEBUG = true;
+const DEBUG = false;
 const LAUNCHER_WIDTH = 560;
 const LAUNCHER_MAX_WIDTH_RATIO = 0.58;
 const LAUNCHER_TOP_RATIO = 0.16;
@@ -36,12 +37,14 @@ const FILE_SEARCH_DEBOUNCE_MS = 180;
 const FILE_SEARCH_MIN_QUERY_LENGTH = 2;
 const SCROLL_KEEP_VISIBLE_MARGIN = 12;
 const SCROLL_EASING = 0.12;
+const BLUR_REDRAW_INTERVAL_MS = 120;
 const SHORTCUT_REFRESH_DELAY_MS = 650;
 const SHORTCUT_LATE_REFRESH_DELAY_MS = 2000;
 const PANEL_ICON_REPOSITION_DELAYS_MS = [0, 250, 1500, 4500];
 const PANEL_ICON_SESSION_REPOSITION_DELAYS_MS = [120, 800, 2200, 5000];
 const PANEL_ICON_PLACEMENT_BEFORE_WORKSPACES = 'before-workspaces';
 const PANEL_ICON_PLACEMENT_AFTER_WORKSPACES = 'after-workspaces';
+const CLI_DESKTOP_PREFIXES = ['gnome.essentials.cli.', 'gnome-essentials-cli-'];
 const CONTEXT_NOTES_DIR_NAME = 'context-notes';
 const CONTEXT_DOUBLE_CLICK_MS = 420;
 const INTERNAL_SHELF_DRAG_THRESHOLD = 8;
@@ -366,6 +369,9 @@ export default class EssentialMenu {
         this._resultsBox = null;
         this._appRecords = [];
         this._favoriteIds = [];
+        this._appIndexDirty = true;
+        this._appIndexRefreshTimeoutId = 0;
+        this._userApplicationsMonitor = null;
         this._desktopIconCache = new Map();
         this._absoluteIconExistsCache = new Map();
         this._fileInfoCache = new Map();
@@ -373,6 +379,7 @@ export default class EssentialMenu {
         this._resultButtons = [];
         this._buttonPool = [];
         this._sectionSeparator = null;
+        this._enabled = false;
         this._selectedIndex = 0;
         this._isOpen = false;
         this._settingsHandlers = [];
@@ -429,16 +436,42 @@ export default class EssentialMenu {
         this.setShelf(shelf);
     }
 
+    _actorCanQueueRedraw(actor) {
+        try {
+            if (!actor || actor.destroyed || !actor.visible) return false;
+            if (typeof actor.get_parent === 'function' && !actor.get_parent()) return false;
+
+            const width = typeof actor.get_width === 'function' ? actor.get_width() : actor.width;
+            const height = typeof actor.get_height === 'function' ? actor.get_height() : actor.height;
+            return Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    _queueBlurRedraw() {
+        for (const actor of [this._blurBackground, this._blurTopTape, this._blurBottomTape]) {
+            if (!this._actorCanQueueRedraw(actor)) continue;
+            try {
+                actor.queue_redraw();
+            } catch (e) {
+                // Actors may disappear during Shell teardown or theme reloads.
+            }
+        }
+    }
+
     /**
      * Enables the Essential Menu, binding key-press shortcuts, pre-warming launcher layouts,
      * loading settings, and caching desktop icons.
      * @returns {void}
      */
     enable() {
+        this._enabled = true;
         global.gnome_essentials_menu = this;
         this._connectSettings();
         this._connectAppSignals();
         this._connectExternalDndSignals();
+        this._startUserApplicationsMonitor();
         this._rebuildAppIndex();
         this._syncPanelIcon();
         global.gnome_essentials_deepwork?._registerFloatingEssentialMenuDropActor?.();
@@ -459,6 +492,7 @@ export default class EssentialMenu {
      * @returns {void}
      */
     disable() {
+        this._enabled = false;
         if (global.gnome_essentials_menu === this) {
             global.gnome_essentials_menu = null;
         }
@@ -467,10 +501,13 @@ export default class EssentialMenu {
         this.setShelf(null);
         this._cancelPanelIconReposition();
         this._cancelShortcutRefresh();
+        this._clearSuppressedResultActivation();
         this._unregisterShortcut();
         this._destroyLauncher();
         this._destroyPanelIcon();
         this._stopInternalShelfDragMonitor();
+        this._stopUserApplicationsMonitor();
+        this._cancelAppIndexRefresh();
         this._disconnectExternalDndSignals();
         this._disconnectAppSignals();
         this._disconnectSettings();
@@ -536,7 +573,7 @@ export default class EssentialMenu {
                 // Keep current theme settings
             }
 
-            if (this._appRecords.length === 0) {
+            if (this._appIndexDirty || this._appRecords.length === 0) {
                 this._rebuildAppIndex();
             }
             this._ensureLauncher();
@@ -556,11 +593,9 @@ export default class EssentialMenu {
             } catch (e) {}
             this._themeSyncTimerId = 0;
         }
-        this._themeSyncTimerId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 16, () => {
+        this._themeSyncTimerId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, BLUR_REDRAW_INTERVAL_MS, () => {
             if (this._isOpen) {
-                if (this._blurBackground) this._blurBackground.queue_redraw();
-                if (this._blurTopTape) this._blurTopTape.queue_redraw();
-                if (this._blurBottomTape) this._blurBottomTape.queue_redraw();
+                this._queueBlurRedraw();
                 return GLib.SOURCE_CONTINUE;
             }
             this._themeSyncTimerId = 0;
@@ -826,13 +861,83 @@ export default class EssentialMenu {
         this._settingsHandlers = [];
     }
 
+    _startUserApplicationsMonitor() {
+        this._stopUserApplicationsMonitor();
+
+        try {
+            const appsDir = Gio.File.new_for_path(this._getUserApplicationsDir());
+            if (!appsDir.query_exists(null)) {
+                appsDir.make_directory_with_parents(null);
+            }
+
+            this._userApplicationsMonitor = appsDir.monitor_directory(Gio.FileMonitorFlags.NONE, null);
+            this._userApplicationsMonitor.connect('changed', (_monitor, file) => {
+                if (!this._enabled) return;
+
+                const name = file?.get_basename?.() || '';
+                if (!name.endsWith('.desktop')) return;
+
+                this._appIndexDirty = true;
+                this._desktopIconCache.clear();
+                this._queueAppIndexRefresh();
+            });
+        } catch (e) {
+            this._userApplicationsMonitor = null;
+            logError(`Failed to monitor user applications directory: ${e.message}`);
+        }
+    }
+
+    _stopUserApplicationsMonitor() {
+        if (!this._userApplicationsMonitor) return;
+
+        try {
+            this._userApplicationsMonitor.cancel();
+        } catch (e) {
+            // Monitor may already be cancelled during Shell teardown.
+        }
+        this._userApplicationsMonitor = null;
+    }
+
+    _queueAppIndexRefresh(delayMs = 450) {
+        this._cancelAppIndexRefresh();
+
+        this._appIndexRefreshTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, delayMs, () => {
+            this._appIndexRefreshTimeoutId = 0;
+            if (!this._enabled) return GLib.SOURCE_REMOVE;
+
+            this._refreshAppIndexNow();
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    _cancelAppIndexRefresh() {
+        if (this._appIndexRefreshTimeoutId <= 0) return;
+
+        try {
+            GLib.source_remove(this._appIndexRefreshTimeoutId);
+        } catch (e) {
+            // Source may already have fired.
+        }
+        this._appIndexRefreshTimeoutId = 0;
+    }
+
+    _refreshAppIndexNow() {
+        this._desktopIconCache.clear();
+        this._appIndexDirty = true;
+        this._rebuildAppIndex();
+        if (this._isOpen) this._renderResults(this._getSearchText());
+    }
+
+    _getUserApplicationsDir() {
+        return GLib.build_filenamev([GLib.get_user_data_dir(), 'applications']);
+    }
+
     _connectAppSignals() {
         this._disconnectAppSignals();
 
         try {
             this._appSystemChangedId = this._appSystem.connect('installed-changed', () => {
-                this._rebuildAppIndex();
-                if (this._isOpen) this._renderResults(this._getSearchText());
+                this._refreshAppIndexNow();
             });
         } catch (e) {
             this._appSystemChangedId = 0;
@@ -840,8 +945,7 @@ export default class EssentialMenu {
 
         try {
             this._favoritesChangedId = global.settings.connect('changed::favorite-apps', () => {
-                this._rebuildAppIndex();
-                if (this._isOpen) this._renderResults(this._getSearchText());
+                this._refreshAppIndexNow();
             });
         } catch (e) {
             this._favoritesChangedId = 0;
@@ -1425,6 +1529,7 @@ export default class EssentialMenu {
             const timeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, Math.max(0, delay), () => {
                 this._panelIconRepositionTimeoutIds = this._panelIconRepositionTimeoutIds
                     .filter(id => id !== timeoutId);
+                if (!this._enabled) return GLib.SOURCE_REMOVE;
                 this._repositionPanelIcon();
                 return GLib.SOURCE_REMOVE;
             });
@@ -1777,9 +1882,7 @@ export default class EssentialMenu {
             // Primary icon support differs between Shell versions.
         }
         this._searchEntry.clutter_text.connect('text-changed', () => {
-            if (this._blurBackground) {
-                this._blurBackground.queue_redraw();
-            }
+            this._queueBlurRedraw();
             this._renderResults(this._getSearchText());
         });
         this._searchEntry.clutter_text.connect('key-press-event', (_actor, event) => {
@@ -1832,9 +1935,7 @@ export default class EssentialMenu {
             const adj = this._resultsScrollView.get_vadjustment();
             if (adj) {
                 adj.connect('notify::value', () => {
-                    if (this._blurBackground) {
-                        this._blurBackground.queue_redraw();
-                    }
+                    this._queueBlurRedraw();
                 });
             }
         } catch (e) {
@@ -1977,9 +2078,7 @@ export default class EssentialMenu {
         }
 
         // Force a full background repaint
-        if (this._blurBackground) this._blurBackground.queue_redraw();
-        if (this._blurTopTape) this._blurTopTape.queue_redraw();
-        if (this._blurBottomTape) this._blurBottomTape.queue_redraw();
+        this._queueBlurRedraw();
     }
 
     _updateBlurTapes() {
@@ -2036,46 +2135,131 @@ export default class EssentialMenu {
                 if (!id || seen.has(id)) continue;
 
                 const app = this._resolveShellApp(installedApp, id);
-                if (!app || !this._shouldShowApp(app)) continue;
-
-                seen.add(id);
-
-                const name = app.get_name() ?? id;
-                const description = this._getAppDescription(app);
-                const keywords = this._getAppKeywords(app);
-                const iconName = this._getAppIconName(app, id);
-                const appInfo = app.get_app_info?.();
-                const desktopPath = appInfo?.get_filename?.() || '';
-                const installSource = classifyAppInstallSource(id, desktopPath, appInfo);
-                const sourceLabel = installSource.sourceLabel || 'Native package';
-                records.push({
-                    app,
-                    id,
-                    name,
-                    description,
-                    iconName,
-                    installSource,
-                    favorite: this._favoriteIds.includes(id),
-                    haystack: normalize([
-                        name,
-                        description,
-                        id,
-                        sourceLabel,
-                        installSource.details,
-                        ...keywords
-                    ].join(' '))
-                });
+                this._addAppRecord(records, seen, app, id);
             }
+
         } catch (e) {
             logError('Failed to rebuild app index: ' + e.message);
         }
+
+        this._appendCliLauncherRecords(records, seen);
 
         records.sort((a, b) => {
             if (a.favorite !== b.favorite) return a.favorite ? -1 : 1;
             return a.name.localeCompare(b.name);
         });
         this._appRecords = records;
+        this._appIndexDirty = false;
         log(`Indexed ${records.length} launchable apps`);
+    }
+
+    _addAppRecord(records, seen, app, id) {
+        if (!id || seen.has(id)) return false;
+        if (!app || !this._shouldShowApp(app)) return false;
+
+        seen.add(id);
+
+        const name = app.get_name?.() ?? id;
+        const description = this._getAppDescription(app);
+        const keywords = this._getAppKeywords(app);
+        const iconName = this._getAppIconName(app, id);
+        const appInfo = app.get_app_info?.() || app.appInfo || null;
+        const desktopPath = appInfo?.get_filename?.() || '';
+        const installSource = classifyAppInstallSource(id, desktopPath, appInfo);
+        const sourceLabel = installSource.sourceLabel || 'Native package';
+        records.push({
+            app,
+            id,
+            name,
+            description,
+            iconName,
+            installSource,
+            favorite: this._favoriteIds.includes(id),
+            haystack: normalize([
+                name,
+                description,
+                id,
+                sourceLabel,
+                installSource.details,
+                ...keywords
+            ].join(' '))
+        });
+
+        return true;
+    }
+
+    _appendCliLauncherRecords(records, seen) {
+        let enumerator = null;
+
+        try {
+            const appsDir = Gio.File.new_for_path(this._getUserApplicationsDir());
+            if (!appsDir.query_exists(null)) return;
+
+            enumerator = appsDir.enumerate_children(
+                'standard::name,standard::type',
+                Gio.FileQueryInfoFlags.NONE,
+                null
+            );
+
+            let info;
+            while ((info = enumerator.next_file(null)) !== null) {
+                if (info.get_file_type() !== Gio.FileType.REGULAR) continue;
+
+                const filename = info.get_name();
+                if (!this._isCliDesktopFilename(filename) || seen.has(filename)) continue;
+
+                const desktopPath = GLib.build_filenamev([this._getUserApplicationsDir(), filename]);
+                const appInfo = this._loadDesktopAppInfo(desktopPath);
+                if (!appInfo) continue;
+
+                const app = this._createShellAppForAppInfo(appInfo);
+                this._addAppRecord(records, seen, app, filename);
+            }
+        } catch (e) {
+            logError(`Failed to scan CLI launchers: ${e.message}`);
+        } finally {
+            try {
+                enumerator?.close(null);
+            } catch (e) {
+                // Enumerator may already be closed.
+            }
+        }
+    }
+
+    _isCliDesktopFilename(filename) {
+        const name = String(filename ?? '').toLowerCase();
+        return name.endsWith('.desktop') &&
+            CLI_DESKTOP_PREFIXES.some(prefix => name.startsWith(prefix));
+    }
+
+    _loadDesktopAppInfo(desktopPath) {
+        try {
+            const desktopAppInfo = GioUnix.DesktopAppInfo || Gio.DesktopAppInfo;
+            return desktopAppInfo?.new_from_filename?.(desktopPath) || null;
+        } catch (e) {
+            logError(`Failed to load desktop app info ${desktopPath}: ${e.message}`);
+            return null;
+        }
+    }
+
+    _createShellAppForAppInfo(appInfo) {
+        try {
+            return new Shell.App({ app_info: appInfo });
+        } catch (e) {
+            return {
+                appInfo,
+                get_app_info: () => appInfo,
+                get_name: () => appInfo.get_name?.() || appInfo.get_display_name?.() || '',
+                get_description: () => appInfo.get_description?.() || '',
+                create_icon_texture: size => {
+                    const icon = appInfo.get_icon?.();
+                    if (icon) {
+                        return new St.Icon({ gicon: icon, icon_size: size });
+                    }
+                    return new St.Icon({ icon_name: 'utilities-terminal', icon_size: size });
+                }
+            };
+        }
     }
 
     _resolveShellApp(installedApp, id) {
@@ -2175,10 +2359,12 @@ export default class EssentialMenu {
         if (normalizedQuery) {
             const results = this._searchAppRecords(normalizedQuery).slice(0, SEARCH_RESULT_LIMIT);
             
-            log(`[GnomeEssentials] Search query: "${normalizedQuery}", results length: ${results.length}`);
-            results.forEach((r, idx) => {
-                log(`[GnomeEssentials]   Result ${idx}: "${r.name}" (${r.id})`);
-            });
+            if (DEBUG) {
+                log(`[GnomeEssentials] Search query: "${normalizedQuery}", results length: ${results.length}`);
+                results.forEach((r, idx) => {
+                    log(`[GnomeEssentials]   Result ${idx}: "${r.name}" (${r.id})`);
+                });
+            }
 
             if (results.length === 0) {
                 this._showInfoLabel('No matching applications');
@@ -2194,12 +2380,13 @@ export default class EssentialMenu {
             this._updateSelection();
             this._updateResultsHeight();
 
-            log(`[GnomeEssentials] _resultsBox visible children count: ${this._resultsBox.get_children().filter(c => c.visible).length}`);
-            this._resultsBox.get_children().forEach((c, idx) => {
-                if (c.visible) {
+            if (DEBUG) {
+                const visibleChildren = this._resultsBox.get_children().filter(c => c.visible);
+                log(`[GnomeEssentials] _resultsBox visible children count: ${visibleChildren.length}`);
+                visibleChildren.forEach((c, idx) => {
                     log(`[GnomeEssentials]   Visible Child ${idx}: margin_top=${c.margin_top}, height=${c.height}, y=${c.get_position()[1]}`);
-                }
-            });
+                });
+            }
             return;
         }
 
@@ -2317,6 +2504,7 @@ export default class EssentialMenu {
         const generation = ++this._fileSearchGeneration;
         this._fileSearchTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, FILE_SEARCH_DEBOUNCE_MS, () => {
             this._fileSearchTimeoutId = 0;
+            if (!this._enabled) return GLib.SOURCE_REMOVE;
             this._startFileSearch(localsearch, query, generation);
             return GLib.SOURCE_REMOVE;
         });
@@ -3032,15 +3220,7 @@ export default class EssentialMenu {
         button.connect('clicked', () => {
             const record = this._visibleRecords[index];
             if (this._suppressNextResultClick) {
-                this._suppressNextResultClick = false;
-                if (this._suppressNextResultClickTimeoutId > 0) {
-                    try {
-                        GLib.source_remove(this._suppressNextResultClickTimeoutId);
-                    } catch (e) {
-                        // It may already have fired.
-                    }
-                    this._suppressNextResultClickTimeoutId = 0;
-                }
+                this._clearSuppressedResultActivation();
                 return;
             }
             if (this._requiresDoubleClickActivation(record)) return;
@@ -3189,20 +3369,21 @@ export default class EssentialMenu {
             can_focus: true,
             track_hover: true,
             visible: false,
-            style: 'padding: 1px 8px; border-radius: 8px; background-color: #c01c28; border: 1px solid #a81620; color: #ffffff; margin-left: auto; margin-right: 4px; y-align: align-center; min-width: 58px;'
+            y_align: Clutter.ActorAlign.CENTER,
+            style: 'padding: 3px 8px; border-radius: 8px; background-color: #c01c28; border: 1px solid #a81620; color: #ffffff; margin-right: 4px; min-width: 58px;'
         });
 
         const uninstallLabel = new St.Label({
             text: 'Uninstall',
-            style: 'font-size: 9.5px; font-weight: bold; color: #ffffff; text-align: center;'
+            style: 'font-size: 10px; font-weight: bold; color: #ffffff; text-align: center;'
         });
         uninstallBtn.set_child(uninstallLabel);
 
         uninstallBtn.connect('notify::hover', () => {
             if (uninstallBtn.hover) {
-                uninstallBtn.style = 'padding: 1px 8px; border-radius: 8px; background-color: #e01b24; border: 1px solid #c01c28; color: #ffffff; margin-left: auto; margin-right: 4px; y-align: align-center; box-shadow: 0 1.5px 4px rgba(0, 0, 0, 0.24); min-width: 58px;';
+                uninstallBtn.style = 'padding: 3px 8px; border-radius: 8px; background-color: #e01b24; border: 1px solid #c01c28; color: #ffffff; margin-right: 4px; min-width: 58px;';
             } else {
-                uninstallBtn.style = 'padding: 1px 8px; border-radius: 8px; background-color: #c01c28; border: 1px solid #a81620; color: #ffffff; margin-left: auto; margin-right: 4px; y-align: align-center; min-width: 58px;';
+                uninstallBtn.style = 'padding: 3px 8px; border-radius: 8px; background-color: #c01c28; border: 1px solid #a81620; color: #ffffff; margin-right: 4px; min-width: 58px;';
             }
         });
 
@@ -3663,9 +3844,7 @@ export default class EssentialMenu {
             }
         });
 
-        if (this._blurBackground) {
-            this._blurBackground.queue_redraw();
-        }
+        this._queueBlurRedraw();
     }
 
     _scrollSelectedIntoView() {
@@ -3673,6 +3852,7 @@ export default class EssentialMenu {
 
         this._scrollIdleId = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
             this._scrollIdleId = 0;
+            if (!this._enabled) return GLib.SOURCE_REMOVE;
             this._scrollSelectedIntoViewDeferred();
             return GLib.SOURCE_REMOVE;
         });
@@ -3691,7 +3871,9 @@ export default class EssentialMenu {
             const viewHeight = viewBox.y2 - viewBox.y1;
             const buttonHeight = buttonBox.y2 - buttonBox.y1;
 
-            log(`[GnomeEssentials] Scroll calculation. selectedIndex: ${this._selectedIndex}, viewBox height: ${viewHeight}, buttonBox: y1=${buttonBox.y1}, y2=${buttonBox.y2}, buttonHeight: ${buttonHeight}`);
+            if (DEBUG) {
+                log(`[GnomeEssentials] Scroll calculation. selectedIndex: ${this._selectedIndex}, viewBox height: ${viewHeight}, buttonBox: y1=${buttonBox.y1}, y2=${buttonBox.y2}, buttonHeight: ${buttonHeight}`);
+            }
 
             // If the layout is not fully allocated yet, abort to prevent bad scroll targets
             if (viewHeight <= 0 || buttonHeight <= 0) return;
@@ -3702,7 +3884,9 @@ export default class EssentialMenu {
             // Get the up-to-date preferred height of the results container
             let [, naturalHeight] = this._resultsBox.get_preferred_height(-1);
 
-            log(`[GnomeEssentials] naturalHeight: ${naturalHeight}, current scroll: ${current}`);
+            if (DEBUG) {
+                log(`[GnomeEssentials] naturalHeight: ${naturalHeight}, current scroll: ${current}`);
+            }
 
             if (naturalHeight <= viewHeight) {
                 target = 0;
@@ -3717,11 +3901,15 @@ export default class EssentialMenu {
                 }
             }
 
-            log(`[GnomeEssentials] Calculated scroll target: ${target}`);
+            if (DEBUG) {
+                log(`[GnomeEssentials] Calculated scroll target: ${target}`);
+            }
 
             target = this._clampScrollValue(adjustment, target);
             if (Math.abs(target - current) > 0.1) {
-                log(`[GnomeEssentials] Animating scroll to target: ${target}`);
+                if (DEBUG) {
+                    log(`[GnomeEssentials] Animating scroll to target: ${target}`);
+                }
                 this._scrollTargetValue = target;
                 this._ensureScrollTimeline();
             }
@@ -3861,6 +4049,7 @@ export default class EssentialMenu {
         if (!keepOpen) this.close();
 
         GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
+            if (!this._enabled) return GLib.SOURCE_REMOVE;
             try {
                 this._activateRecord(record);
                 if (keepOpen && this._isOpen) {
@@ -4029,20 +4218,26 @@ export default class EssentialMenu {
     }
 
     _suppressNextResultActivationBriefly(durationMs = 700) {
+        this._clearSuppressedResultActivation();
+
         this._suppressNextResultClick = true;
+        this._suppressNextResultClickTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, durationMs, () => {
+            this._suppressNextResultClick = false;
+            this._suppressNextResultClickTimeoutId = 0;
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    _clearSuppressedResultActivation() {
+        this._suppressNextResultClick = false;
         if (this._suppressNextResultClickTimeoutId > 0) {
             try {
                 GLib.source_remove(this._suppressNextResultClickTimeoutId);
             } catch (e) {
                 // It may already have fired.
             }
-        }
-
-        this._suppressNextResultClickTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, durationMs, () => {
-            this._suppressNextResultClick = false;
             this._suppressNextResultClickTimeoutId = 0;
-            return GLib.SOURCE_REMOVE;
-        });
+        }
     }
 
     _createInternalShelfDragActor(record) {
@@ -4308,6 +4503,7 @@ export default class EssentialMenu {
             SHELF_DRAG_AUTO_EXPAND_DELAY_MS,
             () => {
                 this._shelfDragAutoExpandTimeoutId = 0;
+                if (!this._enabled) return GLib.SOURCE_REMOVE;
                 const current = this._getShelfAutoExpandableTarget(target);
                 if (current) {
                     current.expand();
@@ -4417,6 +4613,7 @@ export default class EssentialMenu {
             SHELF_DRAG_AUTO_COLLAPSE_DELAY_MS,
             () => {
                 this._shelfDragAutoCollapseTimeouts.delete(key);
+                if (!this._enabled) return GLib.SOURCE_REMOVE;
                 if (!this._shelfDragAutoExpanded.has(key)) {
                     return GLib.SOURCE_REMOVE;
                 }
@@ -4693,16 +4890,21 @@ export default class EssentialMenu {
     }
 
     _getShelfProfileForApp(appId, preferredProfileName = '') {
-        const candidates = [
-            String(preferredProfileName ?? '').trim(),
-            this._getActiveWorkspaceProfileName()
-        ].filter(Boolean);
+        const candidates = [];
+        const addCandidate = profileName => {
+            const resolved = this._resolveWorkspaceProfileName(profileName);
+            if (resolved && !candidates.includes(resolved)) candidates.push(resolved);
+        };
+
+        addCandidate(preferredProfileName);
+        addCandidate(this._getActiveWorkspaceProfileName());
+        addCandidate('Desktop');
 
         for (const profileName of candidates) {
             if (this._profileContainsApp(profileName, appId)) return profileName;
         }
 
-        return '';
+        return this._findWorkspaceProfileContainingApp(appId, candidates);
     }
 
     _getActiveWorkspaceProfileName() {
@@ -5213,6 +5415,7 @@ export default class EssentialMenu {
             try {
                 this.open();
                 GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+                    if (!this._enabled) return GLib.SOURCE_REMOVE;
                     if (this._isOpen) this._activateSearchMode(SHELF_PREFIX);
                     return GLib.SOURCE_REMOVE;
                 });
@@ -5263,7 +5466,9 @@ export default class EssentialMenu {
                     selectionObject.transfer_finish(result);
                     const bytes = stream.steal_as_bytes();
                     const data = bytes.get_data();
-                    const text = new TextDecoder().decode(data);
+                    const text = typeof TextDecoder !== 'undefined'
+                        ? new TextDecoder().decode(data)
+                        : imports.byteArray.toString(data);
                     callback(text, mimetype, mimetypes);
                 } catch (e) {
                     logError(`Could not transfer DND data: ${e.message}`);
@@ -6428,6 +6633,7 @@ export default class EssentialMenu {
         const baseDelay = restored && autoLaunchesProfileApps ? 1300 : 120;
         contexts.forEach((context, index) => {
             GLib.timeout_add(GLib.PRIORITY_DEFAULT, baseDelay + index * 180, () => {
+                if (!this._enabled) return GLib.SOURCE_REMOVE;
                 if (autoLaunchesProfileApps) {
                     if (Array.isArray(context.attachments) && context.attachments.length > 0) {
                         this._openShelfAppAttachments(context, 0, { preferAppSpecific: true });
@@ -6442,6 +6648,7 @@ export default class EssentialMenu {
         if (restored && !autoLaunchesProfileApps && (hasRestoreContextAttachments || hasAdditiveContextAttachments) && profileName) {
             const settleDelay = baseDelay + contexts.length * 220 + 1400;
             GLib.timeout_add(GLib.PRIORITY_DEFAULT, settleDelay, () => {
+                if (!this._enabled) return GLib.SOURCE_REMOVE;
                 this._applyWorkspaceProfileWithAutoLaunch(profileName, false);
                 return GLib.SOURCE_REMOVE;
             });
@@ -6482,6 +6689,7 @@ export default class EssentialMenu {
 
         withAttachments.forEach((context, index) => {
             GLib.timeout_add(GLib.PRIORITY_DEFAULT, Math.max(0, baseDelay + index * 220), () => {
+                if (!this._enabled) return GLib.SOURCE_REMOVE;
                 this._openShelfAppAttachments(context, 0, { preferAppSpecific: true });
                 return GLib.SOURCE_REMOVE;
             });
@@ -6526,6 +6734,7 @@ export default class EssentialMenu {
         if (contextWillLaunchApp) {
             if (profileHasApp) {
                 GLib.timeout_add(GLib.PRIORITY_DEFAULT, 900, () => {
+                    if (!this._enabled) return GLib.SOURCE_REMOVE;
                     this._applyWorkspaceProfile(profileName);
                     return GLib.SOURCE_REMOVE;
                 });
@@ -6540,6 +6749,7 @@ export default class EssentialMenu {
 
         if (profileHasApp) {
             GLib.timeout_add(GLib.PRIORITY_DEFAULT, 900, () => {
+                if (!this._enabled) return GLib.SOURCE_REMOVE;
                 this._applyWorkspaceProfile(profileName);
                 return GLib.SOURCE_REMOVE;
             });
@@ -6564,6 +6774,7 @@ export default class EssentialMenu {
         const willLaunchApp = actions.some(action => action?.launchesApp);
 
         GLib.timeout_add(GLib.PRIORITY_DEFAULT, Math.max(0, delayMs), () => {
+            if (!this._enabled) return GLib.SOURCE_REMOVE;
             let opened = 0;
             let notes = 0;
             let appSpecificOpened = 0;
@@ -7115,7 +7326,8 @@ export default class EssentialMenu {
     }
 
     _profileContainsApp(profileName, appId) {
-        const profile = this._getWorkspaceProfileEntry(profileName);
+        const resolvedProfileName = this._resolveWorkspaceProfileName(profileName);
+        const profile = this._getWorkspaceProfileEntry(resolvedProfileName);
         const windows = Array.isArray(profile?.windows) ? profile.windows : [];
         const target = this._normalizeAppIdForMatch(appId);
 
@@ -7170,8 +7382,7 @@ export default class EssentialMenu {
         if (!profileName) return null;
 
         try {
-            const data = JSON.parse(this._settings?.get_string('profiles-saved-data') || '{}');
-            const profiles = data?.version === 2 && data.profiles ? data.profiles : data;
+            const profiles = this._readWorkspaceProfiles();
             const entry = profiles?.[profileName];
             if (Array.isArray(entry)) {
                 return { name: profileName, windows: entry };
@@ -7184,6 +7395,56 @@ export default class EssentialMenu {
         }
 
         return null;
+    }
+
+    _readWorkspaceProfiles() {
+        try {
+            const data = JSON.parse(this._settings?.get_string('profiles-saved-data') || '{}');
+            return data?.version === 2 && data.profiles ? data.profiles : data;
+        } catch (e) {
+            logError(`Failed to read workspace profiles: ${e.message}`);
+            return {};
+        }
+    }
+
+    _resolveWorkspaceProfileName(profileName) {
+        const requested = String(profileName ?? '').trim();
+        if (!requested) return '';
+
+        const profiles = this._readWorkspaceProfiles();
+        if (profiles?.[requested]) return requested;
+
+        const requestedLower = requested.toLowerCase();
+        return Object.keys(profiles || {}).find(name => name.toLowerCase() === requestedLower) || requested;
+    }
+
+    _findWorkspaceProfileContainingApp(appId, excludedProfiles = []) {
+        const target = this._normalizeAppIdForMatch(appId);
+        if (!target) return '';
+
+        const excluded = new Set(excludedProfiles.map(name => String(name ?? '').toLowerCase()));
+        const profiles = this._readWorkspaceProfiles();
+        const names = Object.keys(profiles || {}).sort((a, b) => {
+            if (a.toLowerCase() === 'desktop') return -1;
+            if (b.toLowerCase() === 'desktop') return 1;
+            return a.localeCompare(b);
+        });
+
+        for (const name of names) {
+            if (excluded.has(name.toLowerCase())) continue;
+
+            const entry = profiles[name];
+            const windows = Array.isArray(entry)
+                ? entry
+                : Array.isArray(entry?.windows)
+                    ? entry.windows
+                    : [];
+            if (windows.some(config => this._normalizeAppIdForMatch(config?.app_id) === target)) {
+                return name;
+            }
+        }
+
+        return '';
     }
 
     _normalizeAppIdForMatch(appId) {
@@ -7212,6 +7473,7 @@ export default class EssentialMenu {
                 this._settings.set_string('profiles-active-profile', '');
             }
             GLib.timeout_add(GLib.PRIORITY_DEFAULT, 700, () => {
+                if (!this._enabled) return GLib.SOURCE_REMOVE;
                 try {
                     this._settings?.set_string('profiles-active-profile', profileName);
                 } catch (e) {
@@ -7413,7 +7675,7 @@ export default class EssentialMenu {
 
             // Resolve absolute import URI relative to the current module's absolute file path to work reliably in GJS ESM
             const currentDir = import.meta.url.substring(0, import.meta.url.lastIndexOf('/'));
-            const importUri = `${currentDir}/appUninstallUtility.js?v=20260603-install-source`;
+            const importUri = `${currentDir}/appUninstallUtility.js?v=20260605-install-source-safety`;
 
             // Dynamically import uninstallation utility to run uninstallation dialogue
             import(importUri).then(Module => {
@@ -7496,6 +7758,7 @@ export default class EssentialMenu {
 
         this._focusIdleId = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
             this._focusIdleId = 0;
+            if (!this._enabled) return GLib.SOURCE_REMOVE;
             if (!this._isOpen || !this._searchEntry) return GLib.SOURCE_REMOVE;
 
             this._grabSearchFocus();
