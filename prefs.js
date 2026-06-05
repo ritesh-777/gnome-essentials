@@ -9,6 +9,7 @@ import Gtk from 'gi://Gtk';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import Adw from 'gi://Adw';
+import GioUnix from 'gi://GioUnix';
 import { ExtensionPreferences } from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
 
 /**
@@ -1296,13 +1297,17 @@ fi
         });
         tweaksPage.add(cliAppCreatorGroup);
 
+        let editingFilename = null;
+        let editingOldIconName = null;
+        let existingLaunchers = [];
+        let isAutoFillingTemplate = false;
+
         const cmdEntryRow = new Adw.EntryRow({
             title: 'Executable Command'
         });
         if ('placeholder_text' in cmdEntryRow) {
             cmdEntryRow.placeholder_text = 'e.g., lazygit, htop, btop, agy';
         }
-        cliAppCreatorGroup.add(cmdEntryRow);
 
         const nameEntryRow = new Adw.EntryRow({
             title: 'Application Name'
@@ -1310,7 +1315,6 @@ fi
         if ('placeholder_text' in nameEntryRow) {
             nameEntryRow.placeholder_text = 'e.g., LazyGit, H-Top, B-Top';
         }
-        cliAppCreatorGroup.add(nameEntryRow);
 
         const iconEntryRow = new Adw.EntryRow({
             title: 'Icon Name or Path (Optional)'
@@ -1318,7 +1322,207 @@ fi
         if ('placeholder_text' in iconEntryRow) {
             iconEntryRow.placeholder_text = 'e.g., gemini, utilities-terminal, or absolute path';
         }
+        
+        const iconPreview = new Gtk.Image({
+            icon_name: 'utilities-terminal',
+            pixel_size: 24,
+            valign: Gtk.Align.CENTER
+        });
+        iconEntryRow.add_prefix(iconPreview);
+
+        const actionsEntryRow = new Adw.EntryRow({
+            title: 'Right-Click Actions (Optional)',
+            tooltip_text: 'Context menu shortcuts that appear when you right-click the application icon in your launcher. Format as "Label: Command; Label2: Command2".'
+        });
+        if ('placeholder_text' in actionsEntryRow) {
+            actionsEntryRow.placeholder_text = 'e.g., Status: git status; Log: git log';
+        }
+
+        const mimeEntryRow = new Adw.EntryRow({
+            title: 'Associated MIME Types (Optional)',
+            tooltip_text: 'File types to associate with this application (separated by semicolons). When registered, right-clicking these files in files manager (Nautilus) allows opening them with this app.'
+        });
+        if ('placeholder_text' in mimeEntryRow) {
+            mimeEntryRow.placeholder_text = 'e.g., text/plain;image/png;application/pdf;';
+        }
+
+        const backgroundRow = new Adw.SwitchRow({
+            title: 'Run in Background',
+            subtitle: 'Run the command silently without opening a terminal window'
+        });
+
+        const argPromptRow = new Adw.SwitchRow({
+            title: 'Prompt for Arguments',
+            subtitle: 'Prompt for command-line arguments using a GUI dialog box on launch'
+        });
+
+        const dragDropRow = new Adw.SwitchRow({
+            title: 'Accept Drag-and-Drop Files',
+            subtitle: 'Allow files dropped onto the app or opened via "Open With" to be passed as arguments'
+        });
+
+        const terminalOptions = [
+            { name: 'Default (System Terminal Runner)', value: '' },
+            { name: 'GNOME Terminal', value: 'gnome-terminal' },
+            { name: 'Ptyxis', value: 'ptyxis' },
+            { name: 'Kitty', value: 'kitty' },
+            { name: 'Alacritty', value: 'alacritty' },
+            { name: 'WezTerm', value: 'wezterm' },
+            { name: 'Tilix', value: 'tilix' },
+            { name: 'xterm', value: 'xterm' }
+        ];
+        const terminalList = Gtk.StringList.new(terminalOptions.map(o => o.name));
+        const terminalRow = new Adw.ComboRow({
+            title: 'Preferred Terminal Emulator',
+            subtitle: 'Terminal used to launch interactive CLI applications',
+            model: terminalList
+        });
+        const savedTerm = settings.get_string('tweaks-cli-creator-terminal');
+        const termIdx = Math.max(0, terminalOptions.findIndex(o => o.value === savedTerm));
+        terminalRow.selected = termIdx;
+        
+        terminalRow.connect('notify::selected', () => {
+            const idx = terminalRow.selected;
+            if (idx >= 0 && idx < terminalOptions.length) {
+                settings.set_string('tweaks-cli-creator-terminal', terminalOptions[idx].value);
+            }
+        });
+
+        // Preset Templates Combo Row
+        const templates = [
+            { name: 'Custom (Blank Configuration)', cmd: '', appName: '', icon: '', actions: '', mime: '', isBg: false, isPrompt: false, isDrag: false },
+            { name: 'LazyGit (Git UI)', cmd: 'lazygit', appName: 'LazyGit', icon: 'git', actions: 'Status: lazygit; Diff: git diff', mime: '', isBg: false, isPrompt: false, isDrag: true },
+            { name: 'Htop (Process Monitor)', cmd: 'htop', appName: 'Htop', icon: 'system-monitor', actions: '', mime: '', isBg: false, isPrompt: false, isDrag: false },
+            { name: 'Btop (System Monitor)', cmd: 'btop', appName: 'Btop', icon: 'system-monitor', actions: '', mime: '', isBg: false, isPrompt: false, isDrag: false },
+            { name: 'Ncdu (Disk Usage)', cmd: 'ncdu', appName: 'Disk Usage Analyzer (NC)', icon: 'disk-quota-symbolic', actions: '', mime: '', isBg: false, isPrompt: false, isDrag: false },
+            { name: 'SysInfo Fetch', cmd: 'fastfetch', appName: 'SysInfo Fetch', icon: 'system-run', actions: '', mime: '', isBg: false, isPrompt: false, isDrag: false }
+        ];
+        const templateList = Gtk.StringList.new(templates.map(t => t.name));
+        const templateRow = new Adw.ComboRow({
+            title: 'Preset Templates',
+            subtitle: 'Select a template to auto-fill common CLI utility configurations',
+            model: templateList
+        });
+        const onUserModifyField = () => {
+            if (!isAutoFillingTemplate && templateRow.selected !== 0) {
+                templateRow.selected = 0;
+            }
+        };
+
+        templateRow.connect('notify::selected', () => {
+            const idx = templateRow.selected;
+            if (idx === 0) return;
+            const t = templates[idx];
+            if (!t) return;
+            
+            isAutoFillingTemplate = true;
+            try {
+                cmdEntryRow.set_text(t.cmd);
+                nameEntryRow.set_text(t.appName);
+                iconEntryRow.set_text(t.icon);
+                actionsEntryRow.set_text(t.actions);
+                mimeEntryRow.set_text(t.mime);
+                backgroundRow.set_active(t.isBg);
+                argPromptRow.set_active(t.isPrompt);
+                dragDropRow.set_active(t.isDrag);
+            } finally {
+                isAutoFillingTemplate = false;
+            }
+        });
+
+        // Add rows in visual order
+        cliAppCreatorGroup.add(templateRow);
+        cliAppCreatorGroup.add(cmdEntryRow);
+        cliAppCreatorGroup.add(nameEntryRow);
         cliAppCreatorGroup.add(iconEntryRow);
+        cliAppCreatorGroup.add(actionsEntryRow);
+        cliAppCreatorGroup.add(mimeEntryRow);
+        cliAppCreatorGroup.add(backgroundRow);
+        cliAppCreatorGroup.add(argPromptRow);
+        cliAppCreatorGroup.add(dragDropRow);
+        cliAppCreatorGroup.add(terminalRow);
+
+        // Wire Event Listeners
+        cmdEntryRow.connect('changed', () => {
+            const cmdText = cmdEntryRow.get_text().trim();
+            const nameText = nameEntryRow.get_text().trim();
+            
+            // Only auto-fill the name field if we are not editing an existing launcher and the name is currently empty
+            if (!editingFilename && !nameText && cmdText) {
+                const parts = cmdText.split(/\s+/);
+                let exe = '';
+                for (const part of parts) {
+                    if (part.includes('=')) continue;
+                    exe = part;
+                    break;
+                }
+                if (exe) {
+                    const base = GLib.path_get_basename(exe);
+                    if (base && !base.startsWith('~') && !base.startsWith('/')) {
+                        const capitalized = base.charAt(0).toUpperCase() + base.slice(1);
+                        nameEntryRow.set_text(capitalized);
+                    }
+                }
+            }
+            onUserModifyField();
+            validateInputs();
+        });
+
+        nameEntryRow.connect('changed', () => {
+            onUserModifyField();
+            validateInputs();
+        });
+
+        iconEntryRow.connect('changed', () => {
+            onUserModifyField();
+            const text = iconEntryRow.get_text().trim();
+            if (!text) {
+                iconPreview.icon_name = 'utilities-terminal';
+            } else if (GLib.path_is_absolute(text)) {
+                try {
+                    const file = Gio.File.new_for_path(text);
+                    if (file.query_exists(null)) {
+                        iconPreview.set_from_file(text);
+                    } else {
+                        iconPreview.icon_name = 'dialog-warning-symbolic';
+                    }
+                } catch (e) {
+                    iconPreview.icon_name = 'dialog-warning-symbolic';
+                }
+            } else {
+                const display = Gdk.Display.get_default();
+                if (display) {
+                    const theme = Gtk.IconTheme.get_for_display(display);
+                    if (theme && theme.has_icon(text)) {
+                        iconPreview.icon_name = text;
+                    } else {
+                        iconPreview.icon_name = 'dialog-warning-symbolic';
+                    }
+                } else {
+                    iconPreview.icon_name = text;
+                }
+            }
+        });
+
+        actionsEntryRow.connect('changed', () => {
+            onUserModifyField();
+        });
+
+        mimeEntryRow.connect('changed', () => {
+            onUserModifyField();
+        });
+
+        backgroundRow.connect('notify::active', () => {
+            onUserModifyField();
+        });
+
+        argPromptRow.connect('notify::active', () => {
+            onUserModifyField();
+        });
+
+        dragDropRow.connect('notify::active', () => {
+            onUserModifyField();
+        });
 
         const createActionRow = new Adw.ActionRow({
             title: 'Create Desktop Launcher',
@@ -1332,9 +1536,6 @@ fi
         createButton.add_css_class('pill');
         createActionRow.add_suffix(createButton);
 
-        let editingFilename = null;
-        let editingOldIconName = null;
-
         const cancelEditButton = new Gtk.Button({
             label: 'Cancel',
             valign: Gtk.Align.CENTER,
@@ -1342,17 +1543,94 @@ fi
         });
         cancelEditButton.add_css_class('flat');
         cancelEditButton.add_css_class('pill');
+        createActionRow.add_suffix(cancelEditButton);
         cancelEditButton.connect('clicked', () => {
+            editingFilename = null;
+            editingOldIconName = null;
+
             cmdEntryRow.set_text('');
             nameEntryRow.set_text('');
             iconEntryRow.set_text('');
+            actionsEntryRow.set_text('');
+            mimeEntryRow.set_text('');
+            backgroundRow.set_active(false);
+            argPromptRow.set_active(false);
+            dragDropRow.set_active(false);
+            templateRow.selected = 0;
             
-            editingFilename = null;
-            editingOldIconName = null;
-            createButton.label = 'Create App';
             cancelEditButton.set_visible(false);
         });
-        createActionRow.add_suffix(cancelEditButton);
+
+        function validateInputs() {
+            const cmdText = cmdEntryRow.get_text().trim();
+            const nameText = nameEntryRow.get_text().trim();
+
+            const normalLabel = editingFilename ? 'Update App' : 'Create App';
+
+            if (!cmdText || !nameText) {
+                createButton.label = normalLabel;
+                createButton.set_sensitive(false);
+                return;
+            }
+
+            // Check duplicate name
+            const nameLower = nameText.toLowerCase();
+            const isNameDuplicate = existingLaunchers.some(app => 
+                app.filename !== editingFilename && app.displayName.toLowerCase() === nameLower
+            );
+            if (isNameDuplicate) {
+                createButton.label = 'Name Taken';
+                createButton.set_sensitive(false);
+                return;
+            }
+
+            // Validate executable existence
+            const parts = cmdText.split(/\s+/);
+            let exeToken = '';
+            for (const part of parts) {
+                if (part.includes('=')) {
+                    continue;
+                }
+                exeToken = part;
+                break;
+            }
+
+            if (!exeToken) {
+                createButton.label = 'Invalid Command';
+                createButton.set_sensitive(false);
+                return;
+            }
+
+            // Strip quotes if any
+            exeToken = exeToken.replace(/^['"]|['"]$/g, '');
+
+            let checkPath = exeToken;
+            if (checkPath.startsWith('~/')) {
+                checkPath = GLib.build_filenamev([GLib.get_home_dir(), checkPath.substring(2)]);
+            }
+
+            let exists = false;
+            if (GLib.path_is_absolute(checkPath)) {
+                try {
+                    exists = Gio.File.new_for_path(checkPath).query_exists(null);
+                } catch (e) {
+                    exists = false;
+                }
+            } else {
+                exists = !!GLib.find_program_in_path(checkPath);
+            }
+
+            if (!exists) {
+                createButton.label = 'Command Not Found';
+                createButton.set_sensitive(false);
+                return;
+            }
+
+            createButton.label = normalLabel;
+            createButton.set_sensitive(true);
+        }
+
+        validateInputs();
 
         cliAppCreatorGroup.add(createActionRow);
 
@@ -1392,7 +1670,7 @@ fi
                             let info;
                             while ((info = enumerator.next_file(null))) {
                                 const name = info.get_name();
-                                if (name.startsWith('gnome-essentials-cli-') && name.endsWith('.desktop')) {
+                                if ((name.startsWith('gnome-essentials-cli-') || name.startsWith('gnome.essentials.cli.')) && name.endsWith('.desktop')) {
                                     files.push(name);
                                 }
                             }
@@ -1413,24 +1691,82 @@ fi
                                     }
                                     
                                     const lines = text.split('\n');
-                                    let displayName = '', exec = '', icon = '';
+                                    let displayName = '', exec = '', icon = '', terminal = true, mime = '';
+                                    let actionsList = [];
+                                    let currentActionName = '', currentActionExec = '';
+                                    let inAction = false;
+                                    
                                     for (let line of lines) {
-                                        if (line.startsWith('Name=')) displayName = line.substring(5).trim();
-                                        if (line.startsWith('Exec=')) exec = line.substring(5).trim();
-                                        if (line.startsWith('Icon=')) icon = line.substring(5).trim();
+                                        line = line.trim();
+                                        if (line.startsWith('[Desktop Action')) {
+                                            if (inAction && currentActionName && currentActionExec) {
+                                                actionsList.push({ name: currentActionName, exec: currentActionExec });
+                                            }
+                                            currentActionName = '';
+                                            currentActionExec = '';
+                                            inAction = true;
+                                            continue;
+                                        } else if (line.startsWith('[')) {
+                                            if (inAction && currentActionName && currentActionExec) {
+                                                actionsList.push({ name: currentActionName, exec: currentActionExec });
+                                            }
+                                            inAction = false;
+                                        }
+                                        
+                                        if (inAction) {
+                                            if (line.startsWith('Name=')) currentActionName = line.substring(5).trim();
+                                            if (line.startsWith('Exec=')) currentActionExec = line.substring(5).trim();
+                                        } else {
+                                            if (line.startsWith('Name=')) displayName = line.substring(5).trim();
+                                            if (line.startsWith('Exec=')) exec = line.substring(5).trim();
+                                            if (line.startsWith('Icon=')) icon = line.substring(5).trim();
+                                            if (line.startsWith('Terminal=false')) terminal = false;
+                                            if (line.startsWith('MimeType=')) mime = line.substring(9).trim();
+                                        }
+                                    }
+                                    if (inAction && currentActionName && currentActionExec) {
+                                        actionsList.push({ name: currentActionName, exec: currentActionExec });
                                     }
                                     
                                     let command = exec;
-                                    const execMatch = exec.match(/bash -c\s+"([^;]+);/);
-                                    if (execMatch) {
-                                        command = execMatch[1].trim();
+                                    const shellMatch = exec.match(/^[^\s]+\s+-c\s+['"]([^'"]+)['"]/);
+                                    if (shellMatch) {
+                                        let inner = shellMatch[1].trim();
+                                        inner = inner.replace(/;\s*exec\s+[^\s]+$/, '');
+                                        const zenityMatch = inner.match(/&&\s*(.+)$/);
+                                        if (zenityMatch) {
+                                            let cmdPart = zenityMatch[1].trim();
+                                            cmdPart = cmdPart.replace(/\s+\$\$?args$/, '');
+                                            command = cmdPart;
+                                        } else {
+                                            inner = inner.replace(/\s+"?\$\$?@"?$/, '');
+                                            command = inner;
+                                        }
                                     }
+                                    
+                                    const parsedActions = [];
+                                    for (const act of actionsList) {
+                                        let actCmd = act.exec;
+                                        const actShellMatch = act.exec.match(/^[^\s]+\s+-c\s+['"]([^'"]+)['"]/);
+                                        if (actShellMatch) {
+                                            let actInner = actShellMatch[1].trim();
+                                            actInner = actInner.replace(/;\s*exec\s+[^\s]+$/, '');
+                                            actCmd = actInner;
+                                        }
+                                        parsedActions.push(`${act.name}: ${actCmd}`);
+                                    }
+                                    const actionsString = parsedActions.join('; ');
                                     
                                     results.push({
                                         filename,
                                         displayName,
                                         command,
-                                        iconName: icon
+                                        iconName: icon,
+                                        isBackground: !terminal,
+                                        isArgPrompt: exec.includes('zenity --entry'),
+                                        isDragDrop: exec.includes('%F'),
+                                        actionsText: actionsString,
+                                        mimeTypes: mime
                                     });
                                 } catch (e) {
                                     console.error('Failed to parse desktop file ' + filename + ': ' + e.message);
@@ -1445,10 +1781,12 @@ fi
             });
         };
 
-        const createLauncher = async (cmd, name, iconInput) => {
+        const createLauncher = async (cmd, name, iconInput, actionsText, backgroundInput, argPromptInput, dragDropInput, mimeTypesInput) => {
             cmd = cmd.trim();
             name = name.trim();
             iconInput = (iconInput || '').trim();
+            actionsText = (actionsText || '').trim();
+            mimeTypesInput = (mimeTypesInput || '').trim();
             if (cmd.length === 0 || name.length === 0) {
                 throw new Error('Command and name cannot be empty.');
             }
@@ -1487,8 +1825,10 @@ fi
             }
 
             const cleanCmd = cmd.replace(/[^a-zA-Z0-9_-]/g, '_').toLowerCase();
-            const desktopFilename = `gnome-essentials-cli-${cleanCmd}.desktop`;
+            const cleanCmdUnder = cleanCmd.replace(/-/g, '_');
+            const desktopFilename = `gnome.essentials.cli.${cleanCmdUnder}.desktop`;
             const desktopPath = GLib.build_filenamev([applicationsDir, desktopFilename]);
+            const startupWMClass = `gnome.essentials.cli.${cleanCmdUnder}`;
 
             const appsFile = Gio.File.new_for_path(applicationsDir);
             if (!appsFile.query_exists(null)) {
@@ -1514,15 +1854,135 @@ fi
             }
 
             const userShell = GLib.getenv('SHELL') || 'bash';
+            
+            const savedTerm = settings.get_string('tweaks-cli-creator-terminal');
+            const acceptFiles = dragDropInput || (mimeTypesInput && mimeTypesInput.length > 0);
+
+            // Build the main Exec command
+            let finalExec = '';
+            let commandToRun = cmd;
+            
+            if (argPromptInput) {
+                commandToRun = `args=$$(zenity --entry --title="${name}" --text="Enter arguments for ${name}:") && ${cmd} $$args`;
+            }
+            
+            if (backgroundInput) {
+                finalExec = `${userShell} -c "${commandToRun}"`;
+            } else {
+                let innerCmd = '';
+                if (acceptFiles) {
+                    innerCmd = `${userShell} -c '${commandToRun} "$$@"; exec ${userShell}' -- %F`;
+                } else {
+                    innerCmd = `${userShell} -c "${commandToRun}; exec ${userShell}"`;
+                }
+
+                if (savedTerm) {
+                    // Modern terminals (e.g., Ptyxis) require a valid GApplication ID scheme (dot-separated, no hyphens)
+                    // and a standalone instance execution flag to bypass single-instance daemons when setting a custom class.
+                    // X11-based terminals accept X11 class overrides directly via class flags.
+                    if (savedTerm === 'gnome-terminal') {
+                        finalExec = `gnome-terminal --class="${startupWMClass}" -- ${innerCmd}`;
+                    } else if (savedTerm === 'ptyxis') {
+                        finalExec = `ptyxis --standalone --gapplication-app-id=${startupWMClass} -- ${innerCmd}`;
+                    } else if (savedTerm === 'kitty') {
+                        finalExec = `kitty --class="${startupWMClass}" ${innerCmd}`;
+                    } else if (savedTerm === 'alacritty') {
+                        finalExec = `alacritty --class "${startupWMClass}" -e ${innerCmd}`;
+                    } else if (savedTerm === 'wezterm') {
+                        finalExec = `wezterm start --class "${startupWMClass}" -- ${innerCmd}`;
+                    } else if (savedTerm === 'tilix') {
+                        finalExec = `tilix --class="${startupWMClass}" -e ${innerCmd}`;
+                    } else if (savedTerm === 'xterm') {
+                        finalExec = `xterm -class "${startupWMClass}" -e ${innerCmd}`;
+                    } else {
+                        finalExec = innerCmd;
+                    }
+                } else {
+                    finalExec = innerCmd;
+                }
+            }
+
+            // Build Right-Click Actions sections
+            let actionsSection = '';
+            let actionsListString = '';
+            
+            if (actionsText.length > 0) {
+                const actionParts = actionsText.split(';').map(s => s.trim()).filter(s => s.includes(':'));
+                const keys = [];
+                for (let i = 0; i < actionParts.length; i++) {
+                    const idx = actionParts[i].indexOf(':');
+                    const actionName = actionParts[i].substring(0, idx).trim();
+                    const actionCmd = actionParts[i].substring(idx + 1).trim();
+                    if (!actionName || !actionCmd) continue;
+                    
+                    const actionKey = `action${i}`;
+                    keys.push(actionKey);
+                    
+                    let actionExec = '';
+                    if (backgroundInput) {
+                        actionExec = `${userShell} -c "${actionCmd}"`;
+                    } else {
+                        // Use terminal prefix if custom terminal is set
+                        let actionInnerCmd = `${userShell} -c "${actionCmd}; exec ${userShell}"`;
+                        if (!backgroundInput && savedTerm) {
+                            // Apply the same custom class to right-click desktop actions so they map to the same window identity.
+                            if (savedTerm === 'gnome-terminal') {
+                                actionExec = `gnome-terminal --class="${startupWMClass}" -- ${actionInnerCmd}`;
+                            } else if (savedTerm === 'ptyxis') {
+                                actionExec = `ptyxis --standalone --gapplication-app-id=${startupWMClass} -- ${actionInnerCmd}`;
+                            } else if (savedTerm === 'kitty') {
+                                actionExec = `kitty --class="${startupWMClass}" ${actionInnerCmd}`;
+                            } else if (savedTerm === 'alacritty') {
+                                actionExec = `alacritty --class "${startupWMClass}" -e ${actionInnerCmd}`;
+                            } else if (savedTerm === 'wezterm') {
+                                actionExec = `wezterm start --class "${startupWMClass}" -- ${actionInnerCmd}`;
+                            } else if (savedTerm === 'tilix') {
+                                actionExec = `tilix --class="${startupWMClass}" -e ${actionInnerCmd}`;
+                            } else if (savedTerm === 'xterm') {
+                                actionExec = `xterm -class "${startupWMClass}" -e ${actionInnerCmd}`;
+                            } else {
+                                actionExec = actionInnerCmd;
+                            }
+                        } else {
+                            actionExec = actionInnerCmd;
+                        }
+                    }
+                    
+                    actionsSection += `
+[Desktop Action ${actionKey}]
+Name=${actionName}
+Exec=${actionExec}
+`;
+                }
+                if (keys.length > 0) {
+                    actionsListString = `Actions=${keys.join(';')};`;
+                }
+            }
+
+            let mimeLine = '';
+            if (mimeTypesInput && mimeTypesInput.length > 0) {
+                let cleanMime = mimeTypesInput;
+                if (!cleanMime.endsWith(';')) {
+                    cleanMime += ';';
+                }
+                mimeLine = `MimeType=${cleanMime}`;
+            }
+
+            const isTerminalValue = (!backgroundInput && !savedTerm) ? 'true' : 'false';
+
             const desktopContent = `[Desktop Entry]
 Type=Application
 Version=1.0
 Name=${name}
 Comment=CLI tool launched via GNOME Essentials
 Icon=${finalIconName}
-Exec=${userShell} -c "${cmd}; exec ${userShell}"
-Terminal=true
+Exec=${finalExec}
+Terminal=${isTerminalValue}
+StartupWMClass=${startupWMClass}
 Categories=Utility;Development;
+${actionsListString}
+${actionsSection}
+${mimeLine}
 `;
 
             const desktopFile = Gio.File.new_for_path(desktopPath);
@@ -1572,7 +2032,7 @@ Categories=Utility;Development;
                 console.error('Failed to delete desktop file: ' + e.message);
             }
             
-            if (iconName && iconName.startsWith('gnome-essentials-cli-')) {
+            if (iconName && (iconName.startsWith('gnome-essentials-cli-') || iconName.startsWith('gnome.essentials.cli.'))) {
                 const iconPath = GLib.build_filenamev([iconsDir, `${iconName}.svg`]);
                 try {
                     const iFile = Gio.File.new_for_path(iconPath);
@@ -1602,6 +2062,8 @@ Categories=Utility;Development;
             }
 
             listLaunchers().then(launchers => {
+                existingLaunchers = launchers;
+                validateInputs();
                 if (launchers.length === 0) {
                     const noAppsRow = new Adw.ActionRow({
                         title: 'No custom CLI apps created yet',
@@ -1610,9 +2072,19 @@ Categories=Utility;Development;
                     cliAppListContainer.append(noAppsRow);
                 } else {
                     for (const app of launchers) {
+                        let subtitleText = `Runs command: "${app.command}"`;
+                        const statusTags = [];
+                        if (app.isBackground) statusTags.push('Background');
+                        if (app.isArgPrompt) statusTags.push('Prompts');
+                        if (app.isDragDrop) statusTags.push('Drag-Drop');
+                        if (app.actionsText) statusTags.push('Actions');
+                        if (statusTags.length > 0) {
+                            subtitleText += ` (${statusTags.join(', ')})`;
+                        }
+                        
                         const row = new Adw.ActionRow({
                             title: app.displayName,
-                            subtitle: `Runs command: "${app.command}"`
+                            subtitle: subtitleText
                         });
 
                         const rowIcon = new Gtk.Image({
@@ -1637,6 +2109,31 @@ Categories=Utility;Development;
                             });
                         });
 
+                        const runBtn = new Gtk.Button({
+                            icon_name: 'media-playback-start-symbolic',
+                            valign: Gtk.Align.CENTER,
+                            tooltip_text: 'Test Launch Application'
+                        });
+                        runBtn.add_css_class('flat');
+                        runBtn.connect('clicked', () => {
+                            try {
+                                const filePath = GLib.build_filenamev([applicationsDir, app.filename]);
+                                const appInfo = GioUnix.DesktopAppInfo.new_from_filename(filePath);
+                                if (appInfo) {
+                                    appInfo.launch([], null);
+                                } else {
+                                    throw new Error('Could not load desktop file');
+                                }
+                            } catch (err) {
+                                console.error('Failed to launch: ' + err.message);
+                                if (typeof window.add_toast === 'function') {
+                                    window.add_toast(new Adw.Toast({
+                                        title: 'Launch Failed: ' + err.message
+                                    }));
+                                }
+                            }
+                        });
+
                         const editBtn = new Gtk.Button({
                             icon_name: 'document-edit-symbolic',
                             valign: Gtk.Align.CENTER,
@@ -1649,11 +2146,19 @@ Categories=Utility;Development;
                             cmdEntryRow.set_text(app.command);
                             nameEntryRow.set_text(app.displayName);
                             iconEntryRow.set_text(app.iconName === 'utilities-terminal' ? '' : app.iconName);
+                            actionsEntryRow.set_text(app.actionsText || '');
+                            mimeEntryRow.set_text(app.mimeTypes || '');
+                            backgroundRow.set_active(app.isBackground);
+                            argPromptRow.set_active(app.isArgPrompt);
+                            dragDropRow.set_active(app.isDragDrop);
+                            templateRow.selected = 0;
+                            
                             createButton.label = 'Update App';
                             cancelEditButton.set_visible(true);
                             cmdEntryRow.grab_focus();
                         });
 
+                        row.add_suffix(runBtn);
                         row.add_suffix(editBtn);
                         row.add_suffix(deleteBtn);
 
@@ -1669,29 +2174,38 @@ Categories=Utility;Development;
             const cmd = cmdEntryRow.get_text();
             const name = nameEntryRow.get_text();
             const icon = iconEntryRow.get_text();
+            const actions = actionsEntryRow.get_text();
+            const mime = mimeEntryRow.get_text();
+            const isBackground = backgroundRow.get_active();
+            const isArgPrompt = argPromptRow.get_active();
+            const isDragDrop = dragDropRow.get_active();
             
             createButton.set_sensitive(false);
             
             const actionPromise = editingFilename
-                ? removeLauncher(editingFilename, editingOldIconName).then(() => createLauncher(cmd, name, icon))
-                : createLauncher(cmd, name, icon);
+                ? removeLauncher(editingFilename, editingOldIconName).then(() => createLauncher(cmd, name, icon, actions, isBackground, isArgPrompt, isDragDrop, mime))
+                : createLauncher(cmd, name, icon, actions, isBackground, isArgPrompt, isDragDrop, mime);
             
             actionPromise
                 .then(() => {
+                    editingFilename = null;
+                    editingOldIconName = null;
+
                     cmdEntryRow.set_text('');
                     nameEntryRow.set_text('');
                     iconEntryRow.set_text('');
+                    actionsEntryRow.set_text('');
+                    mimeEntryRow.set_text('');
+                    backgroundRow.set_active(false);
+                    argPromptRow.set_active(false);
+                    dragDropRow.set_active(false);
+                    templateRow.selected = 0;
                     
-                    editingFilename = null;
-                    editingOldIconName = null;
-                    createButton.label = 'Create App';
                     cancelEditButton.set_visible(false);
-
-                    createButton.set_sensitive(true);
                     rebuildLauncherList();
                 })
                 .catch(err => {
-                    createButton.set_sensitive(true);
+                    validateInputs();
                     console.error('Failed to save launcher: ' + err.message);
                     if (typeof window.add_toast === 'function') {
                         window.add_toast(new Adw.Toast({

@@ -550,9 +550,13 @@ The CLI Application Creator turns any terminal command or script into a **first-
 
 Key capabilities:
 - **Theme-Aware & Custom Icons**: The creator automatically searches your active icon theme for a matching icon (based on the command or application name). If not found, it falls back to a standard terminal launcher icon. You can also specify any custom icon name or absolute path manually.
-- **Persistent Output Terminal**: The launcher configures the command to run in your default system terminal and inserts an auto-keep-open instruction (`exec bash`), ensuring that output text doesn't disappear when the command finishes execution.
-- **Immediate Integration**: Spawns the desktop launcher instantly without requiring a Shell reload or admin authentication (`pkexec`). The generated app immediately appears in your GNOME App Grid search, launcher, and can be pinned to your **Essential Shelf**.
-- **Self-Healing File Management**: Created apps are listed inside the settings page, allowing you to edit their properties (name, command, icon) or delete them and their generated assets cleanly with a single click.
+- **Background Mode (Service Tweak)**: Can be toggled to run silently in the background (using `Terminal=false`) without cluttering your screen with a terminal window—ideal for local daemons, web servers, or automated scripts.
+- **Dynamic Argument Prompts**: Prompts you for dynamic command-line arguments using a native GTK dialog (via Zenity) each time you click the launcher.
+- **Drag-and-Drop File Receiver**: Allows files dropped onto the launcher (or opened via Nautilus's "Open With" menu) to be safely forwarded as positional parameters to your command.
+- **Right-Click Desktop Actions**: Supports registering custom quick-actions (e.g. adding `Status: git status; Pull: git pull` context menu commands) accessible via right-click.
+- **Preferred Terminal & Workspace Profile Integration**: You can select a preferred terminal emulator (GNOME Terminal, Ptyxis, Kitty, Alacritty, WezTerm, Tilix, or XTerm). The extension automatically wraps your application inside the chosen terminal with dedicated class/ID parameters (e.g. `--gapplication-app-id` for Ptyxis, `--class` for others). This allows the **Workspace Profile Restorer** to track the CLI window uniquely rather than mapping it to a blank generic terminal shell, enabling complete workspace state recovery.
+- **Preferred Shell Execution**: Automatically detects and uses your active login shell (`zsh`, `fish`, `bash`, etc.) for wrapper execution and trailing shell interaction.
+- **Self-Healing File Management**: Created apps are listed inside the settings page showing active status flags (Background, Prompts, etc.), allowing you to edit their properties or delete them and their generated assets cleanly with a single click.
 
 ## Settings Window
 

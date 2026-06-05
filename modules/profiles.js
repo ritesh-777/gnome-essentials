@@ -1699,6 +1699,11 @@ export default class ProfilesModule {
         const gtilePlacement = this._getGTilePlacement(win, frameRect, ws, monitor);
         const forgePlacement = this._getForgePlacement(win);
 
+        const monitors = Main.layoutManager?.monitors || [];
+        const monitorGeo = (typeof monitor === 'number' && monitor >= 0 && monitor < monitors.length)
+            ? monitors[monitor]
+            : null;
+
         return {
             app_id: appId,
             wm_class: wmClass,
@@ -1721,7 +1726,13 @@ export default class ProfilesModule {
                 y: frameRect.y,
                 width: frameRect.width,
                 height: frameRect.height
-            }
+            },
+            monitor_rect: monitorGeo ? {
+                x: monitorGeo.x ?? 0,
+                y: monitorGeo.y ?? 0,
+                width: monitorGeo.width ?? 1920,
+                height: monitorGeo.height ?? 1080
+            } : null
         };
     }
 
@@ -3072,13 +3083,41 @@ export default class ProfilesModule {
             const isGTileConfig = this._hasGTilePlacement(config);
             const isForgeConfig = this._hasForgePlacement(config);
 
-            if (config.monitor !== null &&
-                config.monitor !== undefined &&
-                this._isValidMonitorIndex(config.monitor) &&
-                typeof win.get_monitor === 'function' &&
+            let targetMonitorIndex = config.monitor;
+            if (targetMonitorIndex === null || targetMonitorIndex === undefined || !this._isValidMonitorIndex(targetMonitorIndex)) {
+                targetMonitorIndex = 0;
+            }
+
+            if (typeof win.get_monitor === 'function' &&
                 typeof win.move_to_monitor === 'function' &&
-                win.get_monitor() !== config.monitor) {
-                win.move_to_monitor(config.monitor);
+                win.get_monitor() !== targetMonitorIndex) {
+                win.move_to_monitor(targetMonitorIndex);
+            }
+
+            let x = rect ? rect.x : 0;
+            let y = rect ? rect.y : 0;
+            let width = rect ? rect.width : 100;
+            let height = rect ? rect.height : 100;
+
+            const currentMonitor = Main.layoutManager?.monitors?.[targetMonitorIndex];
+            if (rect && currentMonitor && currentMonitor.width > 0 && currentMonitor.height > 0) {
+                if (config.monitor_rect && config.monitor_rect.width > 0 && config.monitor_rect.height > 0) {
+                    const relX = (rect.x - config.monitor_rect.x) / config.monitor_rect.width;
+                    const relY = (rect.y - config.monitor_rect.y) / config.monitor_rect.height;
+                    const relWidth = rect.width / config.monitor_rect.width;
+                    const relHeight = rect.height / config.monitor_rect.height;
+
+                    x = Math.round(currentMonitor.x + relX * currentMonitor.width);
+                    y = Math.round(currentMonitor.y + relY * currentMonitor.height);
+                    width = Math.round(relWidth * currentMonitor.width);
+                    height = Math.round(relHeight * currentMonitor.height);
+                }
+
+                // Constrain values to fit inside monitor bounds
+                width = Math.max(100, Math.min(width, currentMonitor.width));
+                height = Math.max(100, Math.min(height, currentMonitor.height));
+                x = Math.max(currentMonitor.x, Math.min(x, currentMonitor.x + currentMonitor.width - width));
+                y = Math.max(currentMonitor.y, Math.min(y, currentMonitor.y + currentMonitor.height - height));
             }
 
             const tilingShellHandled = isTilingShellConfig && this._applyTilingShellTile(win, config);
@@ -3105,7 +3144,7 @@ export default class ProfilesModule {
                 if (typeof win.unmaximize === 'function') {
                     win.unmaximize();
                 }
-                win.move_resize_frame(true, rect.x, rect.y, rect.width, rect.height);
+                win.move_resize_frame(true, x, y, width, height);
             }
 
             if (!handledByTiler) {

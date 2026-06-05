@@ -350,6 +350,12 @@
       <description>Add an 'Uninstall' button to application search results inside the Essential Menu quick launcher.</description>
     </key>
 
+    <key name="tweaks-cli-creator-terminal" type="s">
+      <default>""</default>
+      <summary>CLI Creator Default Terminal Emulator</summary>
+      <description>Terminal emulator used to launch non-background CLI applications. Leave blank for default shell terminal runner.</description>
+    </key>
+
     <!-- Workspace Profiles (Workspace Session Restorer) -->
     <key name="profiles-enabled" type="b">
       <default>true</default>
