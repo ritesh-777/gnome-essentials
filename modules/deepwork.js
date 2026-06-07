@@ -131,6 +131,7 @@ export default class DeepWorkModule {
         this._floatingPomodoroChromeTracked = false;
         this._floatingPomodoroChromePlacement = null;
         this._floatingPomodoroRaiseTimerId = 0;
+        this._floatingPomodoroRecreateIdleId = 0;
         this._recreatingFloatingPanel = false;
         this._ambientTimerId = 0;
         this._ambientOverlay = null;
@@ -854,7 +855,11 @@ export default class DeepWorkModule {
     _restorePaperWMPanelWorkAreaBridge() {
         if (this._paperWMOriginalShowTopBar.size === 0) return;
 
+        const liveSpaces = new Set(this._getPaperWMSpaces());
+
         for (const [space, originalShowTopBar] of this._paperWMOriginalShowTopBar.entries()) {
+            if (!liveSpaces.has(space)) continue;
+
             try {
                 space.showTopBar = originalShowTopBar;
                 this._layoutPaperWMSpace(space);
@@ -2792,6 +2797,8 @@ export default class DeepWorkModule {
         collectStaleActors(global.stage);
 
         for (const actor of staleActors) {
+            this._prepareFloatingPomodoroActorForRemoval(actor);
+
             try {
                 Main.layoutManager?.removeChrome?.(actor);
             } catch (e) {
@@ -2867,6 +2874,21 @@ export default class DeepWorkModule {
 
         this._floatingPomodoroChromeTracked = false;
         this._floatingPomodoroChromePlacement = null;
+    }
+
+    _prepareFloatingPomodoroActorForRemoval(actor) {
+        if (!actor) return;
+
+        try {
+            if (typeof actor.remove_all_transitions === 'function') {
+                actor.remove_all_transitions();
+            }
+            actor.reactive = false;
+            actor.opacity = 0;
+            actor.hide();
+        } catch (e) {
+            // Actor may already be in teardown.
+        }
     }
 
     _raiseFloatingPomodoro() {
@@ -2952,14 +2974,27 @@ export default class DeepWorkModule {
     }
 
     _getFloatingPomodoroSize() {
-        if (!this._floatingPomodoroActor) return { width: 96, height: 32 };
+        const isVertical = this._settings.get_boolean('deepwork-pomodoro-floating-vertical');
+        const minWidth = isVertical ? 32 : 96;
+        const minHeight = 28;
+
+        if (!this._floatingPomodoroActor) return { width: minWidth, height: minHeight };
+
+        const allocatedWidth = Math.ceil(this._floatingPomodoroActor.width || 0);
+        const allocatedHeight = Math.ceil(this._floatingPomodoroActor.height || 0);
+        if (allocatedWidth > 0 && allocatedHeight > 0) {
+            return {
+                width: Math.max(minWidth, allocatedWidth),
+                height: Math.max(minHeight, allocatedHeight)
+            };
+        }
 
         const [, naturalWidth] = this._floatingPomodoroActor.get_preferred_width(-1);
         const [, naturalHeight] = this._floatingPomodoroActor.get_preferred_height(naturalWidth || -1);
 
         return {
-            width: Math.max(96, Math.ceil(naturalWidth || 96)),
-            height: Math.max(28, Math.ceil(naturalHeight || 28))
+            width: Math.max(minWidth, Math.ceil(naturalWidth || minWidth)),
+            height: Math.max(minHeight, Math.ceil(naturalHeight || minHeight))
         };
     }
 
@@ -3006,11 +3041,12 @@ export default class DeepWorkModule {
     }
 
     _clampFloatingPomodoroPosition(x, y, monitor, width, height) {
-        const margin = 8;
-        const minX = monitor.x + margin;
-        const minY = monitor.y + margin;
-        const maxX = Math.max(minX, monitor.x + monitor.width - width - margin);
-        const maxY = Math.max(minY, monitor.y + monitor.height - height - margin);
+        const marginX = 8;
+        const marginY = 8;
+        const minX = monitor.x + marginX;
+        const minY = monitor.y + marginY;
+        const maxX = Math.max(minX, monitor.x + monitor.width - width - marginX);
+        const maxY = Math.max(minY, monitor.y + monitor.height - height - marginY);
 
         return [
             clamp(Math.round(x), minX, maxX),
@@ -4143,6 +4179,12 @@ export default class DeepWorkModule {
     }
 
     _destroyFloatingPomodoroIndicator() {
+        if (this._floatingPomodoroRecreateIdleId) {
+            GLib.source_remove(this._floatingPomodoroRecreateIdleId);
+            this._floatingPomodoroRecreateIdleId = 0;
+            this._recreatingFloatingPanel = false;
+        }
+
         this._finishFloatingPomodoroDrag();
         this._stopFloatingPomodoroRaiseTimer();
         this._cancelPanelPeek(false);
@@ -4153,8 +4195,10 @@ export default class DeepWorkModule {
         }
         if (!this._floatingPomodoroActor) return;
 
-        this._removeFloatingPomodoroActor(this._floatingPomodoroActor);
-        this._floatingPomodoroActor.destroy();
+        const actor = this._floatingPomodoroActor;
+        this._prepareFloatingPomodoroActorForRemoval(actor);
+        this._removeFloatingPomodoroActor(actor);
+        actor.destroy();
         this._floatingPomodoroActor = null;
         this._floatingPomodoroLabel = null;
         this._floatingPomodoroClockSeparator = null;
@@ -4167,6 +4211,52 @@ export default class DeepWorkModule {
         this._floatingEssentialMenuButton = null;
         this._floatingPomodoroChromeTracked = false;
         this._floatingPomodoroChromePlacement = null;
+    }
+
+    _finishFloatingPomodoroRecreation(callback, animateNewActor) {
+        if (this._floatingPomodoroRecreateIdleId) return;
+
+        this._prepareFloatingPomodoroActorForRemoval(this._floatingPomodoroActor);
+        this._floatingPomodoroRecreateIdleId = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+            this._floatingPomodoroRecreateIdleId = 0;
+
+            try {
+                if (typeof callback === 'function') callback();
+            } catch (e) {
+                logError(`Callback error in floating Pomodoro recreation: ${e.message}`);
+            }
+
+            this._destroyFloatingPomodoroIndicator();
+
+            if (!this._enabled) {
+                this._recreatingFloatingPanel = false;
+                return GLib.SOURCE_REMOVE;
+            }
+
+            this._createFloatingPomodoroIndicator();
+            this._syncFloatingPomodoroVisibility();
+
+            if (animateNewActor && this._floatingPomodoroActor?.visible) {
+                this._floatingPomodoroActor.opacity = 0;
+                this._floatingPomodoroActor.scale_x = 0.9;
+                this._floatingPomodoroActor.scale_y = 0.9;
+                this._floatingPomodoroActor.set_pivot_point(0.5, 0.5);
+                this._floatingPomodoroActor.ease({
+                    opacity: 255,
+                    scale_x: 1.0,
+                    scale_y: 1.0,
+                    duration: 150,
+                    mode: Clutter.AnimationMode.EASE_OUT_CUBIC,
+                    onComplete: () => {
+                        this._recreatingFloatingPanel = false;
+                    }
+                });
+            } else {
+                this._recreatingFloatingPanel = false;
+            }
+
+            return GLib.SOURCE_REMOVE;
+        });
     }
 
     _easeActorOpacity(actor, visible, targetOpacity = 255, animate = true) {
@@ -4221,45 +4311,11 @@ export default class DeepWorkModule {
                 duration: 120,
                 mode: Clutter.AnimationMode.EASE_IN_CUBIC,
                 onComplete: () => {
-                    try {
-                        if (typeof callback === 'function') callback();
-                    } catch (e) {
-                        logError(`Callback error in floating Pomodoro recreation: ${e.message}`);
-                    }
-                    this._destroyFloatingPomodoroIndicator();
-                    this._createFloatingPomodoroIndicator();
-                    this._syncFloatingPomodoroVisibility();
-                    
-                    if (this._floatingPomodoroActor) {
-                        this._floatingPomodoroActor.opacity = 0;
-                        this._floatingPomodoroActor.scale_x = 0.9;
-                        this._floatingPomodoroActor.scale_y = 0.9;
-                        this._floatingPomodoroActor.set_pivot_point(0.5, 0.5);
-                        this._floatingPomodoroActor.ease({
-                            opacity: 255,
-                            scale_x: 1.0,
-                            scale_y: 1.0,
-                            duration: 150,
-                            mode: Clutter.AnimationMode.EASE_OUT_CUBIC,
-                            onComplete: () => {
-                                this._recreatingFloatingPanel = false;
-                            }
-                        });
-                    } else {
-                        this._recreatingFloatingPanel = false;
-                    }
+                    this._finishFloatingPomodoroRecreation(callback, true);
                 }
             });
         } else {
-            try {
-                if (typeof callback === 'function') callback();
-            } catch (e) {
-                logError(`Callback error in floating Pomodoro recreation: ${e.message}`);
-            }
-            this._destroyFloatingPomodoroIndicator();
-            this._createFloatingPomodoroIndicator();
-            this._syncFloatingPomodoroVisibility();
-            this._recreatingFloatingPanel = false;
+            this._finishFloatingPomodoroRecreation(callback, false);
         }
     }
 }
