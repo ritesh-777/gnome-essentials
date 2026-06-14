@@ -260,6 +260,70 @@
     -boxpointer-gap: 12px;
 }
 
+.pomodoro-summary-header-item,
+.pomodoro-summary-scroll-menu-item {
+    padding: 0px;
+}
+
+.pomodoro-summary-header {
+    padding: 8px 10px 4px 10px;
+    spacing: 8px;
+}
+
+.pomodoro-summary-title {
+    color: #ffffff;
+    font-weight: bold;
+    font-size: 9.5pt;
+}
+
+.pomodoro-summary-clear-button {
+    border-radius: 999px;
+    padding: 4px;
+    color: rgba(255, 255, 255, 0.78);
+    transition: background-color 150ms, color 150ms;
+}
+
+.pomodoro-summary-clear-button:hover {
+    background-color: rgba(255, 255, 255, 0.12);
+    color: #ffffff;
+}
+
+.pomodoro-summary-clear-icon {
+    icon-size: 14px;
+}
+
+.pomodoro-summary-scroll-view {
+    padding: 2px 8px 8px 8px;
+}
+
+.pomodoro-summary-list {
+    spacing: 6px;
+}
+
+.pomodoro-summary-notification-row {
+    padding: 7px 8px;
+    border-radius: 8px;
+    background-color: rgba(255, 255, 255, 0.06);
+}
+
+.pomodoro-summary-notification-title {
+    color: rgba(255, 255, 255, 0.95);
+    font-size: 8.6pt;
+    font-weight: bold;
+}
+
+.pomodoro-summary-notification-body {
+    color: rgba(255, 255, 255, 0.72);
+    font-size: 8.3pt;
+    padding-top: 2px;
+}
+
+.pomodoro-summary-empty-label {
+    color: rgba(255, 255, 255, 0.68);
+    font-size: 9pt;
+    padding: 7px 8px 10px 8px;
+}
+
 .essential-menu-light .essential-menu-result {
     color: #1c1c1e !important;
     border: 1px solid transparent !important;

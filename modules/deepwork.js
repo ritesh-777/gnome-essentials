@@ -69,6 +69,7 @@ export default class DeepWorkModule {
         this._overviewShownId = 0;
         this._overviewHidingId = 0;
         this._overviewHiddenId = 0;
+        this._fullscreenChangedId = 0;
         this._overviewPanelHideTimerId = 0;
         this._postOverviewPanelReconcileTimerId = 0;
         this._panelRevealRefreshTimerId = 0;
@@ -1910,6 +1911,7 @@ export default class DeepWorkModule {
     _connectSignals() {
         this._focusWindowId = global.display.connect('notify::focus-window', () => {
             this._queueAmbientDimmingRefresh();
+            this._syncFloatingPomodoroVisibility();
             this._queueFloatingPomodoroRaise();
         });
 
@@ -1917,6 +1919,7 @@ export default class DeepWorkModule {
             GLib.timeout_add(GLib.PRIORITY_DEFAULT, 100, () => {
                 if (!this._enabled || !this._active) return GLib.SOURCE_REMOVE;
                 this._queueAmbientDimmingRefresh();
+                this._syncFloatingPomodoroVisibility();
                 this._queueFloatingPomodoroRaise();
                 return GLib.SOURCE_REMOVE;
             });
@@ -1924,8 +1927,19 @@ export default class DeepWorkModule {
 
         this._workspaceChangedId = global.workspace_manager.connect('active-workspace-changed', () => {
             this._queueAmbientDimmingRefresh();
+            this._syncFloatingPomodoroVisibility();
             this._queueFloatingPomodoroRaise();
         });
+
+        try {
+            this._fullscreenChangedId = global.display.connect('in-fullscreen-changed', () => {
+                this._finishFloatingPomodoroDrag();
+                this._syncFloatingPomodoroVisibility();
+                this._queueFloatingPomodoroRaise();
+            });
+        } catch (e) {
+            this._fullscreenChangedId = 0;
+        }
 
         const updateOverviewPanel = (overviewVisible, options = {}) => {
             const settled = options.settled ?? true;
@@ -2040,6 +2054,10 @@ export default class DeepWorkModule {
         if (this._workspaceChangedId > 0) {
             global.workspace_manager.disconnect(this._workspaceChangedId);
             this._workspaceChangedId = 0;
+        }
+        if (this._fullscreenChangedId > 0) {
+            global.display.disconnect(this._fullscreenChangedId);
+            this._fullscreenChangedId = 0;
         }
         if (this._overviewShowingId > 0) {
             Main.overview.disconnect(this._overviewShowingId);
@@ -3319,12 +3337,62 @@ export default class DeepWorkModule {
         }
     }
 
+    _getFloatingPomodoroVisibilityMonitor() {
+        try {
+            if (this._floatingPomodoroActor) {
+                const { width, height } = this._getFloatingPomodoroSize();
+                const centerX = this._floatingPomodoroActor.x + width / 2;
+                const centerY = this._floatingPomodoroActor.y + height / 2;
+                return this._getMonitorForPoint(centerX, centerY).monitor;
+            }
+        } catch (e) {
+            // Fall back to the saved monitor below.
+        }
+
+        return this._getSavedFloatingPomodoroMonitor();
+    }
+
+    _isWindowFullscreen(win) {
+        try {
+            if (!win) return false;
+            if (typeof win.is_fullscreen === 'function') return win.is_fullscreen();
+            if (typeof win.get_fullscreen === 'function') return win.get_fullscreen();
+            return !!win.fullscreen;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    _isFloatingPomodoroBlockedByFullscreen() {
+        try {
+            const monitor = this._getFloatingPomodoroVisibilityMonitor();
+            if (monitor?.inFullscreen) return true;
+
+            const focusedWindow = global.display.focus_window ||
+                (typeof global.display.get_focus_window === 'function'
+                    ? global.display.get_focus_window()
+                    : null);
+            if (!this._isWindowFullscreen(focusedWindow)) return false;
+
+            const monitors = Main.layoutManager.monitors || [];
+            const monitorIndex = monitor?.index ?? monitors.indexOf(monitor);
+            const windowMonitorIndex = typeof focusedWindow.get_monitor === 'function'
+                ? focusedWindow.get_monitor()
+                : -1;
+
+            return monitorIndex >= 0 && windowMonitorIndex === monitorIndex;
+        } catch (e) {
+            return false;
+        }
+    }
+
     _syncFloatingPomodoroVisibility() {
         const shouldShow = this._pomodoroButton &&
             this._isPomodoroControllerEnabled() &&
             this._isPomodoroSessionActive() &&
             !this._panelPeekActive &&
-            !Main.overview.visible;
+            !Main.overview.visible &&
+            !this._isFloatingPomodoroBlockedByFullscreen();
 
         if (shouldShow) {
             if (!this._floatingPomodoroActor) {
@@ -3340,6 +3408,9 @@ export default class DeepWorkModule {
         } else {
             if (this._floatingPomodoroActor) {
                 this._floatingPomodoroActor.hide();
+            }
+            if (this._activeSummaryMenu?.sourceActor === this._floatingPomodoroCountBadge) {
+                this._activeSummaryMenu.close();
             }
         }
         this._ensureClockTimer();
@@ -3606,6 +3677,100 @@ export default class DeepWorkModule {
         }
     }
 
+    _setScrollViewChild(scrollView, child) {
+        if (!scrollView || !child) return;
+
+        if (typeof scrollView.set_child === 'function') {
+            scrollView.set_child(child);
+        } else if (typeof scrollView.add_actor === 'function') {
+            scrollView.add_actor(child);
+        } else {
+            scrollView.add_child(child);
+        }
+    }
+
+    _clearFocusNotificationsFromPanel() {
+        this._focusNotificationCount = 0;
+        this._focusNotificationHadSuppression = false;
+        this._focusNotifications = [];
+        this._updatePomodoroDisplay();
+    }
+
+    _getMutedNotificationsPopupGeometry(sourceActor, side) {
+        const fallback = {
+            width: 360,
+            maxListHeight: 280
+        };
+
+        try {
+            const [x, y] = sourceActor.get_transformed_position();
+            const monitorIndex = Main.layoutManager.findIndexForActor(sourceActor);
+            const monitor = Main.layoutManager.monitors[monitorIndex] || Main.layoutManager.primaryMonitor;
+            if (!monitor) return fallback;
+
+            const margin = 44;
+            const headerReserve = 72;
+            const sourceHeight = Math.max(0, sourceActor.height || 0);
+            let availableHeight = monitor.height - margin * 2;
+
+            if (side === St.Side.TOP) {
+                availableHeight = monitor.y + monitor.height - (y + sourceHeight) - margin;
+            } else if (side === St.Side.BOTTOM) {
+                availableHeight = y - monitor.y - margin;
+            }
+
+            const heightLimit = Math.max(96, Math.min(420, monitor.height - 140));
+            const maxAvailableWidth = Math.max(220, Math.floor(monitor.width - 64));
+
+            return {
+                width: Math.min(360, maxAvailableWidth),
+                maxListHeight: clamp(Math.floor(availableHeight - headerReserve), 96, heightLimit)
+            };
+        } catch (e) {
+            return fallback;
+        }
+    }
+
+    _truncateNotificationText(text, maxLength) {
+        const normalized = String(text || '').replace(/\s+/g, ' ').trim();
+        if (normalized.length <= maxLength) return normalized;
+        return normalized.substring(0, Math.max(0, maxLength - 3)) + '...';
+    }
+
+    _createMutedNotificationRow(notif) {
+        const row = new St.BoxLayout({
+            style_class: 'pomodoro-summary-notification-row',
+            vertical: true,
+            x_expand: true
+        });
+
+        let titleText = notif.appName || 'System';
+        if (notif.title) {
+            titleText += `: ${notif.title}`;
+        }
+        titleText = this._truncateNotificationText(titleText, 140);
+
+        const titleLabel = new St.Label({
+            text: titleText,
+            style_class: 'pomodoro-summary-notification-title',
+            x_expand: true
+        });
+        titleLabel.clutter_text.line_wrap = true;
+        row.add_child(titleLabel);
+
+        if (notif.body) {
+            const bodyLabel = new St.Label({
+                text: this._truncateNotificationText(notif.body, 180),
+                style_class: 'pomodoro-summary-notification-body',
+                x_expand: true
+            });
+            bodyLabel.clutter_text.line_wrap = true;
+            row.add_child(bodyLabel);
+        }
+
+        return row;
+    }
+
     _showMutedNotificationsPopup(sourceActor) {
         if (!sourceActor) return;
 
@@ -3649,6 +3814,8 @@ export default class DeepWorkModule {
             }
         }
 
+        const geometry = this._getMutedNotificationsPopupGeometry(sourceActor, side);
+
         // Create a new lightweight PopupMenu attached to the sourceActor
         const menu = new PopupMenu.PopupMenu(sourceActor, 0.5, side);
         menu.sourceActor = sourceActor;
@@ -3659,36 +3826,92 @@ export default class DeepWorkModule {
             menu.actor.add_style_class_name('pomodoro-summary-popover-floating');
         }
 
-        // Add a Header Title
-        const header = new PopupMenu.PopupMenuItem('Muted Notifications', { reactive: false });
-        header.label.style = 'font-weight: bold; font-size: 9.5pt; color: #ffffff;';
-        menu.addMenuItem(header);
+        const headerItem = new PopupMenu.PopupBaseMenuItem({
+            reactive: false,
+            can_focus: false,
+            style_class: 'pomodoro-summary-header-item'
+        });
+        const headerBox = new St.BoxLayout({
+            style_class: 'pomodoro-summary-header',
+            x_expand: true
+        });
+        const headerLabel = new St.Label({
+            text: 'Muted Notifications',
+            style_class: 'pomodoro-summary-title',
+            x_expand: true,
+            y_align: Clutter.ActorAlign.CENTER
+        });
+        headerBox.add_child(headerLabel);
+
+        if (this._focusNotifications.length > 0) {
+            const clearButton = new St.Button({
+                style_class: 'pomodoro-summary-clear-button',
+                can_focus: true,
+                track_hover: true,
+                accessible_name: 'Clear muted notifications'
+            });
+            clearButton.set_child(new St.Icon({
+                icon_name: 'edit-clear-symbolic',
+                style_class: 'system-status-icon pomodoro-summary-clear-icon'
+            }));
+            clearButton.connect('clicked', () => {
+                this._clearFocusNotificationsFromPanel();
+                menu.close();
+            });
+            headerBox.add_child(clearButton);
+        }
+
+        headerItem.add_child(headerBox);
+        menu.addMenuItem(headerItem);
         menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
+        const listBox = new St.BoxLayout({
+            style_class: 'pomodoro-summary-list',
+            vertical: true,
+            x_expand: true
+        });
+        listBox.style = `width: ${geometry.width}px;`;
+
         if (this._focusNotifications.length === 0) {
-            const item = new PopupMenu.PopupMenuItem('No notifications silenced', { reactive: false });
-            item.label.style = 'font-size: 9pt; color: rgba(255,255,255,0.7);';
-            menu.addMenuItem(item);
+            const emptyLabel = new St.Label({
+                text: 'No notifications silenced',
+                style_class: 'pomodoro-summary-empty-label',
+                x_expand: true
+            });
+            listBox.add_child(emptyLabel);
         } else {
             for (const notif of this._focusNotifications) {
-                let displayText = notif.appName;
-                if (notif.title) {
-                    displayText += `: ${notif.title}`;
-                }
-                if (notif.body) {
-                    let bodyText = notif.body;
-                    if (bodyText.length > 60) {
-                        bodyText = bodyText.substring(0, 57) + '...';
-                    }
-                    displayText += ` - "${bodyText}"`;
-                }
-
-                const item = new PopupMenu.PopupMenuItem(displayText, { reactive: false });
-                item.label.style = 'font-size: 8.5pt; color: rgba(255,255,255,0.95); text-align: left;';
-                item.label.clutter_text.line_wrap = true;
-                menu.addMenuItem(item);
+                listBox.add_child(this._createMutedNotificationRow(notif));
             }
         }
+
+        const verticalScrollbarPolicy = St.PolicyType.AUTOMATIC ??
+            St.PolicyType.ALWAYS ??
+            St.PolicyType.NEVER;
+        const scrollView = new St.ScrollView({
+            style_class: 'pomodoro-summary-scroll-view',
+            reactive: true,
+            overlay_scrollbars: true,
+            clip_to_allocation: true,
+            x_expand: true,
+            hscrollbar_policy: St.PolicyType.NEVER,
+            vscrollbar_policy: verticalScrollbarPolicy
+        });
+        scrollView.style = `max-height: ${geometry.maxListHeight}px;`;
+        try {
+            scrollView.set_mouse_scrolling(true);
+        } catch (e) {
+            // Mouse scrolling is enabled by default on some Shell versions.
+        }
+        this._setScrollViewChild(scrollView, listBox);
+
+        const scrollItem = new PopupMenu.PopupBaseMenuItem({
+            reactive: false,
+            can_focus: false,
+            style_class: 'pomodoro-summary-scroll-menu-item'
+        });
+        scrollItem.add_child(scrollView);
+        menu.addMenuItem(scrollItem);
 
         // Close and destroy the menu when it loses focus or is closed
         menu.connect('open-state-changed', (menuActor, isOpen) => {
