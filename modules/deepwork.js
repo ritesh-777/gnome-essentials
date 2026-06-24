@@ -1041,12 +1041,13 @@ export default class DeepWorkModule {
             const hidePanelInOverview = this._settings.get_boolean('deepwork-hide-panel-in-overview');
             const muteNotifications = this._settings.get_boolean('deepwork-mute-notifications');
             const isLevel2 = snoozeLevel >= 1;
+            const shouldHidePanelOnDesktop = isLevel2 && hidePanel;
 
             // --- Notification suppression (DND-style banner hiding) ---
             this._setNotificationBannersSuppressed(muteNotifications);
 
             // --- Panel visibility. Level 1 leaves the panel alone; Level 2 can hide it.
-            if (isLevel2 && hidePanel && !Main.overview.visible) {
+            if (shouldHidePanelOnDesktop && !Main.overview.visible) {
                 this._stopOverviewPanelHideWatchdog();
                 this._hidePanelSafely();
             } else {
@@ -1058,8 +1059,11 @@ export default class DeepWorkModule {
                 }
             }
 
-            // --- Dock/Panel extensions hiding (Dash to Dock, Dash to Panel) ---
-            this._suppressExternalDocks(hideDock);
+            // --- Dock extensions hiding. If the panel is effectively visible,
+            // leave panel-adjacent extension actors untouched as well.
+            this._suppressExternalDocks(hideDock, {
+                preservePanelActors: !shouldHidePanelOnDesktop
+            });
 
             // --- Apply ambient window dimming & blur ---
             this._applyAmbientDimming();
@@ -1342,7 +1346,9 @@ export default class DeepWorkModule {
         this._messageTrayBannerActorStates.clear();
     }
 
-    _suppressExternalDocks(suppress) {
+    _suppressExternalDocks(suppress, options = {}) {
+        const preservePanelActors = options.preservePanelActors ?? false;
+
         // Dynamic detection and suppression of Dash to Dock or Dash to Panel actors
         try {
             // Suppress via Dash to Dock GSettings safely by verifying schema presence first to prevent Gio exceptions
@@ -1366,14 +1372,52 @@ export default class DeepWorkModule {
             // Ignore if Dash to Dock is not installed/enabled
         }
 
+        const actorName = actor => {
+            try {
+                return actor?.get_name ? (actor.get_name() || '').toLowerCase() : '';
+            } catch (e) {
+                return '';
+            }
+        };
+        const isPanelLikeActor = actor => {
+            const name = actorName(actor);
+            return name.includes('panel') || name.includes('topbar') || name.includes('top-bar');
+        };
+        const isSuppressibleDockActor = actor => {
+            if (actor === Main.panel || actor === Main.layoutManager.panelBox) return false;
+
+            const name = actorName(actor);
+            if (!name) return false;
+            if (preservePanelActors && isPanelLikeActor(actor)) return false;
+
+            return name.includes('dock') ||
+                name.includes('dash') ||
+                (!preservePanelActors && isPanelLikeActor(actor));
+        };
+        const restoreActor = (actor, state) => {
+            try {
+                actor.set_opacity(state.opacity ?? 255);
+                actor.set_reactive(state.reactive ?? true);
+            } catch (restoreErr) {
+                // Actor may have been destroyed while Deep Work was active.
+            }
+        };
+
         // Apply a direct CSS transition or opacity shift to any visible docks or panels in the layoutManager
         try {
             if (suppress) {
+                if (preservePanelActors) {
+                    for (const [actor, state] of [...this._externalDockActorStates.entries()]) {
+                        if (!isPanelLikeActor(actor)) continue;
+
+                        restoreActor(actor, state);
+                        this._externalDockActorStates.delete(actor);
+                    }
+                }
+
                 // Loop through children of UI actors looking for dock overlays
                 Main.layoutManager.uiGroup.get_children().forEach(actor => {
-                    if (actor === Main.panel || actor === Main.layoutManager.panelBox) return;
-                    const name = actor.get_name ? (actor.get_name() || '').toLowerCase() : '';
-                    if (!name || (!name.includes('dock') && !name.includes('panel') && !name.includes('dash'))) return;
+                    if (!isSuppressibleDockActor(actor)) return;
 
                     if (!this._externalDockActorStates.has(actor)) {
                         this._externalDockActorStates.set(actor, {
@@ -1388,12 +1432,7 @@ export default class DeepWorkModule {
                 });
             } else {
                 for (const [actor, state] of this._externalDockActorStates.entries()) {
-                    try {
-                        actor.set_opacity(state.opacity ?? 255);
-                        actor.set_reactive(state.reactive ?? true);
-                    } catch (restoreErr) {
-                        // Actor may have been destroyed while Deep Work was active.
-                    }
+                    restoreActor(actor, state);
                 }
                 this._externalDockActorStates.clear();
             }
@@ -3386,10 +3425,19 @@ export default class DeepWorkModule {
         }
     }
 
+    _shouldShowFloatingPomodoroForPanelState() {
+        try {
+            return this._shouldHidePanelOnDesktop() && !this._isPanelVisible();
+        } catch (e) {
+            return false;
+        }
+    }
+
     _syncFloatingPomodoroVisibility() {
         const shouldShow = this._pomodoroButton &&
             this._isPomodoroControllerEnabled() &&
             this._isPomodoroSessionActive() &&
+            this._shouldShowFloatingPomodoroForPanelState() &&
             !this._panelPeekActive &&
             !Main.overview.visible &&
             !this._isFloatingPomodoroBlockedByFullscreen();

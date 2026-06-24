@@ -11,7 +11,6 @@ import St from 'gi://St';
 import * as DND from 'resource:///org/gnome/shell/ui/dnd.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as ModalDialog from 'resource:///org/gnome/shell/ui/modalDialog.js';
-import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import { classifyAppInstallSource } from './appInstallSource.js?v=20260605-source-path';
 
 const DEBUG = false;
@@ -362,6 +361,7 @@ export default class EssentialMenu {
         this._indicator = null;
         this._indicatorMenuOpenId = 0;
         this._panelClickConnections = [];
+        this._panelClickActors = new Set();
         this._floatingDropActor = null;
         this._launcher = null;
         this._searchEntry = null;
@@ -1188,9 +1188,7 @@ export default class EssentialMenu {
             return 'menu';
         }
 
-        if (this._pointInsideActor(this._indicator, x, y) ||
-            this._pointInsideActor(this._indicator?.container, x, y) ||
-            this._pointInsideActor(this._indicator?.first_child, x, y) ||
+        if (this._pointInsidePanelIcon(x, y) ||
             this._pointInsideActor(this._floatingDropActor, x, y)) {
             return 'panel';
         }
@@ -1425,28 +1423,38 @@ export default class EssentialMenu {
 
         this._clearPanelStatusAreaRole();
 
-        this._indicator = new PanelMenu.Button(0.0, 'Essentials Quick Launcher', false);
-        this._indicator.track_hover = false; // Disable hover tracking during startup settlement
+        this._indicator = new St.Button({
+            style_class: 'panel-button essential-menu-panel-button',
+            reactive: true,
+            can_focus: true,
+            track_hover: true,
+            accessible_name: 'Essentials Quick Launcher'
+        });
 
         const box = new St.BoxLayout({
             style_class: 'panel-status-menu-box'
         });
-        box.add_child(new St.Icon({
+        const icon = new St.Icon({
             icon_name: 'view-app-grid-symbolic',
             style_class: 'system-status-icon'
-        }));
-        this._indicator.add_child(box);
-        this._connectPanelClickActor(this._indicator, 'indicator');
+        });
+        box.add_child(icon);
+        this._indicator.set_child(box);
+        this._indicator.container = this._indicator;
 
-        this._indicatorMenuOpenId = this._indicator.menu.connect('open-state-changed', (_menu, isOpen) => {
-            if (!isOpen) return;
-
-            log('Panel menu open-state requested quick launcher');
-            this._indicator.menu.close();
+        const clickedId = this._indicator.connect('clicked', () => {
+            log('Panel button click requested quick launcher');
             this.toggle();
         });
+        this._panelClickConnections.push([this._indicator, clickedId]);
 
-        Main.panel.addToStatusArea('gnome-essential-menu', this._indicator, this._getPanelIconInitialPosition(), 'left');
+        const leftBox = Main.panel?._leftBox;
+        if (leftBox && typeof leftBox.insert_child_at_index === 'function') {
+            leftBox.insert_child_at_index(this._indicator, this._getPanelIconInitialPosition());
+            Main.panel.statusArea['gnome-essential-menu'] = this._indicator;
+        } else {
+            Main.panel.addToStatusArea('gnome-essential-menu', this._indicator, this._getPanelIconInitialPosition(), 'left');
+        }
         this._schedulePanelIconReposition(PANEL_ICON_REPOSITION_DELAYS_MS);
         if (typeof global.sync_pointer === 'function') {
             global.sync_pointer();
@@ -1454,26 +1462,6 @@ export default class EssentialMenu {
         global.gnome_essentials_deepwork?._registerFloatingEssentialMenuDropActor?.();
         log('Panel icon added');
 
-        if (this._startupMotionId > 0) {
-            global.stage.disconnect(this._startupMotionId);
-            this._startupMotionId = 0;
-        }
-
-        this._startupMotionId = global.stage.connect('captured-event', (stage, event) => {
-            if (event.type() === Clutter.EventType.MOTION) {
-                if (this._indicator) {
-                    this._indicator.track_hover = true;
-                    if (typeof global.sync_pointer === 'function') {
-                        global.sync_pointer();
-                    }
-                }
-                if (this._startupMotionId > 0) {
-                    global.stage.disconnect(this._startupMotionId);
-                    this._startupMotionId = 0;
-                }
-            }
-            return Clutter.EVENT_PROPAGATE;
-        });
     }
 
     _destroyPanelIcon() {
@@ -1497,8 +1485,9 @@ export default class EssentialMenu {
                 }
             }
             this._panelClickConnections = [];
+            this._panelClickActors.clear();
 
-            if (this._indicatorMenuOpenId > 0) {
+            if (this._indicatorMenuOpenId > 0 && this._indicator.menu) {
                 this._indicator.menu.disconnect(this._indicatorMenuOpenId);
             }
             this._clearPanelStatusAreaRole(indicator);
@@ -1655,18 +1644,21 @@ export default class EssentialMenu {
 
     _connectPanelClickActor(actor, label) {
         if (!actor || typeof actor.connect !== 'function') return;
+        if (this._panelClickActors.has(actor)) return;
 
-        const pressId = actor.connect('button-press-event', () => {
-            log(`Panel ${label} press requested quick launcher`);
-            this.toggle();
-            return Clutter.EVENT_STOP;
-        });
-        const releaseId = actor.connect('button-release-event', () => {
-            return Clutter.EVENT_STOP;
-        });
-        const touchId = actor.connect('touch-event', (_actor, event) => {
-            if (event.type() === Clutter.EventType.TOUCH_BEGIN) {
-                log(`Panel ${label} touch requested quick launcher`);
+        this._panelClickActors.add(actor);
+
+        const eventId = actor.connect('event', (_actor, event) => {
+            const eventType = event.type();
+
+            if (eventType === Clutter.EventType.BUTTON_PRESS ||
+                eventType === Clutter.EventType.TOUCH_BEGIN) {
+                return Clutter.EVENT_STOP;
+            }
+
+            if (eventType === Clutter.EventType.BUTTON_RELEASE ||
+                eventType === Clutter.EventType.TOUCH_END) {
+                log(`Panel ${label} click requested quick launcher`);
                 this.toggle();
                 return Clutter.EVENT_STOP;
             }
@@ -1674,7 +1666,14 @@ export default class EssentialMenu {
             return Clutter.EVENT_PROPAGATE;
         });
 
-        this._panelClickConnections.push([actor, pressId], [actor, releaseId], [actor, touchId]);
+        this._panelClickConnections.push([actor, eventId]);
+    }
+
+    _pointInsidePanelIcon(x, y) {
+        return this._pointInsideActor(this._indicator, x, y) ||
+            this._pointInsideActor(this._indicator?.container, x, y) ||
+            this._pointInsideActor(this._indicator?.first_child, x, y) ||
+            this._pointInsideActor(this._indicator?.get_child?.(), x, y);
     }
 
     _ensureLauncher() {
@@ -7794,7 +7793,7 @@ export default class EssentialMenu {
                 eventType === Clutter.EventType.TOUCH_BEGIN) {
                 const [x, y] = event.get_coords();
                 if (!this._pointInsideActor(this._launcher, x, y) &&
-                    !this._pointInsideActor(this._indicator, x, y) &&
+                    !this._pointInsidePanelIcon(x, y) &&
                     !this._pointInsideActor(this._floatingDropActor, x, y)) {
                     this.close();
                     return Clutter.EVENT_PROPAGATE;
