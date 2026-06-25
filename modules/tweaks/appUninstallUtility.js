@@ -605,7 +605,7 @@ fi
             const canonicalHome = GLib.canonicalize_filename(home, null);
             const canonicalConfigBase = GLib.canonicalize_filename(configBase, null);
             const canonicalCacheBase = GLib.canonicalize_filename(cacheBase, null);
-            const sanitizeCleanupToken = value => {
+            const normalizeCleanupToken = value => {
                 const raw = String(value ?? '')
                     .toLowerCase()
                     .trim()
@@ -616,15 +616,33 @@ fi
                 const token = raw.replace(/[^a-z0-9._-]/g, '');
                 return token.length >= 3 && token !== '.' && token !== '..' ? token : '';
             };
+            const sanitizeCleanupToken = value => {
+                const raw = String(value ?? '')
+                    .trim()
+                    .replace(/\.desktop$/i, '')
+                    .replace(/\s+/g, '');
+                if (!raw || raw.includes('/') || raw.includes('\\') || raw.includes('..')) return '';
+
+                const token = raw.replace(/[^a-zA-Z0-9._-]/g, '');
+                return normalizeCleanupToken(token) ? token : '';
+            };
             
             const cleanId = sanitizeCleanupToken(appId);
             const cleanName = sanitizeCleanupToken(appName);
+            const normalizedCleanupTokens = new Set([
+                normalizeCleanupToken(cleanId),
+                normalizeCleanupToken(cleanName),
+                normalizeCleanupToken(cleanId.split('.').pop())
+            ].filter(Boolean));
             
             const probableDirs = new Set([
                 cleanId,
                 cleanName,
                 cleanId.split('.').pop()
             ].filter(Boolean));
+            for (const token of normalizedCleanupTokens) {
+                probableDirs.add(token);
+            }
 
             // Add standard configuration structures
             const isWebAppLauncher = classification?.sourceType === 'webapp' || classification?.isPWA;
@@ -672,6 +690,39 @@ fi
                     this._runCommandAsync(['rm', '-rf', canonicalDir]);
                 }
             };
+            const addCaseInsensitiveMatches = base => {
+                const baseFile = Gio.File.new_for_path(base);
+                let enumerator = null;
+
+                try {
+                    enumerator = baseFile.enumerate_children(
+                        'standard::name,standard::type',
+                        Gio.FileQueryInfoFlags.NONE,
+                        null
+                    );
+
+                    let info;
+                    while ((info = enumerator.next_file(null)) !== null) {
+                        if (info.get_file_type() !== Gio.FileType.DIRECTORY) continue;
+
+                        const name = info.get_name();
+                        if (normalizedCleanupTokens.has(normalizeCleanupToken(name))) {
+                            probableDirs.add(name);
+                        }
+                    }
+                } catch (e) {
+                    logError(`Failed to scan ${base} for case-insensitive cleanup matches: ${e.message}`);
+                } finally {
+                    try {
+                        enumerator?.close(null);
+                    } catch (e) {
+                        // Enumerator may already be closed.
+                    }
+                }
+            };
+
+            addCaseInsensitiveMatches(configBase);
+            addCaseInsensitiveMatches(cacheBase);
 
             for (const folder of probableDirs) {
                 trashDir(configBase, folder);
