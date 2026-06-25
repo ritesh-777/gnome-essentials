@@ -635,33 +635,35 @@ fi
                 normalizeCleanupToken(cleanId.split('.').pop())
             ].filter(Boolean));
             
-            const probableDirs = new Set([
+            const configCacheDirs = new Set([
                 cleanId,
                 cleanName,
                 cleanId.split('.').pop()
             ].filter(Boolean));
+            const homeHiddenDirs = new Set();
             for (const token of normalizedCleanupTokens) {
-                probableDirs.add(token);
+                configCacheDirs.add(token);
+                homeHiddenDirs.add(`.${token}`);
             }
 
             // Add standard configuration structures
             const isWebAppLauncher = classification?.sourceType === 'webapp' || classification?.isPWA;
             if (!isWebAppLauncher && cleanId.includes('firefox')) {
-                probableDirs.add('.mozilla');
+                homeHiddenDirs.add('.mozilla');
             }
             if (!isWebAppLauncher && (cleanId.includes('chrome') || cleanId.includes('chromium'))) {
-                probableDirs.add('.config/google-chrome');
-                probableDirs.add('.config/chromium');
+                homeHiddenDirs.add('.config/google-chrome');
+                homeHiddenDirs.add('.config/chromium');
             }
 
             // Clean up AUR helper build caches (yay, paru) for Arch Linux packages
             if (cleanId) {
-                probableDirs.add(`yay/${cleanId}`);
-                probableDirs.add(`paru/clone/${cleanId}`);
+                configCacheDirs.add(`yay/${cleanId}`);
+                configCacheDirs.add(`paru/clone/${cleanId}`);
             }
             if (cleanName) {
-                probableDirs.add(`yay/${cleanName}`);
-                probableDirs.add(`paru/clone/${cleanName}`);
+                configCacheDirs.add(`yay/${cleanName}`);
+                configCacheDirs.add(`paru/clone/${cleanName}`);
             }
 
             const trashDir = (base, folderName) => {
@@ -707,7 +709,7 @@ fi
 
                         const name = info.get_name();
                         if (normalizedCleanupTokens.has(normalizeCleanupToken(name))) {
-                            probableDirs.add(name);
+                            configCacheDirs.add(name);
                         }
                     }
                 } catch (e) {
@@ -724,9 +726,12 @@ fi
             addCaseInsensitiveMatches(configBase);
             addCaseInsensitiveMatches(cacheBase);
 
-            for (const folder of probableDirs) {
+            for (const folder of configCacheDirs) {
                 trashDir(configBase, folder);
                 trashDir(cacheBase, folder);
+            }
+            for (const folder of homeHiddenDirs) {
+                trashDir(home, folder);
             }
         } catch (e) {
             logError(`Failed to clean up leftover user data: ${e.message}`);
